@@ -15,5 +15,10 @@ __pycache__/
 .vscode/
 .idea/
 
+# Model binaries (不入库)
+*.rknn
+*.onnx
+*.pt
+
 # Empty dirs
 sysroot/
