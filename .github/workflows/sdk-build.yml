@@ -1,0 +1,72 @@
+name: Luckfox SDK Build
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 120
+
+    env:
+      DEBIAN_FRONTEND: noninteractive
+
+    steps:
+      # ---- Free up disk space on the runner ----
+      - name: Free disk space
+        run: |
+          echo "=== Disk usage before cleanup ==="
+          df -h /
+          sudo rm -rf /usr/share/dotnet
+          sudo rm -rf /usr/local/lib/android
+          sudo rm -rf /opt/ghc
+          sudo rm -rf /opt/hostedtoolcache
+          sudo rm -rf /usr/local/share/boost
+          sudo rm -rf /usr/share/swift
+          sudo docker image prune --all --force || true
+          echo "=== Disk usage after cleanup ==="
+          df -h /
+
+      # ---- Checkout this repository ----
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # ---- Install SDK build dependencies ----
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            git ssh make gcc gcc-multilib g++-multilib \
+            module-assistant expect g++ gawk texinfo libssl-dev bison flex \
+            fakeroot cmake unzip gperf autoconf device-tree-compiler \
+            libncurses5-dev pkg-config bc python-is-python3 passwd openssl \
+            openssh-server openssh-client vim file cpio rsync curl \
+            android-tools-adb python3-pip python3-venv \
+            sudo locales
+          sudo locale-gen en_US.UTF-8
+
+      # ---- Shallow clone Luckfox SDK ----
+      - name: Clone Luckfox SDK
+        run: |
+          git clone --depth 1 https://github.com/LuckfoxTECH/luckfox-pico.git
+
+      # ---- Build the SDK (RV1106G3 + Buildroot) ----
+      - name: Build SDK
+        working-directory: luckfox-pico
+        run: |
+          export LANG=en_US.UTF-8
+          export LC_ALL=en_US.UTF-8
+          chmod +x build.sh
+          # Use the non-interactive lunch command for RV1106G3 + Buildroot
+          # BoardConfig file: BoardConfig-RV1106G3-BUILDROOT
+          ./build.sh lunch BoardConfig-RV1106G3-BUILDROOT
+          ./build.sh
+
+      # ---- Upload firmware artifacts ----
+      - name: Upload firmware artifacts
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: luckfox-firmware
+          path: luckfox-pico/output/image/
+          retention-days: 7
