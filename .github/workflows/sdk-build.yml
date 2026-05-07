@@ -57,9 +57,8 @@ jobs:
           export LANG=en_US.UTF-8
           export LC_ALL=en_US.UTF-8
           chmod +x build.sh
-          # Use the non-interactive lunch command for RV1106G3 + Buildroot
-          # BoardConfig file: BoardConfig-RV1106G3-BUILDROOT
-          echo "5" | ./build.sh lunch
+          # Non-interactive lunch: "5" = Pico Ultra, "0" = EMMC boot
+          printf '5\n0\n' | ./build.sh lunch
           ./build.sh
 
       # ---- Upload firmware artifacts ----
