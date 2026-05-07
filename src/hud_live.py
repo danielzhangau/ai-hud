@@ -39,7 +39,11 @@ COL_LIMIT_BG = (252, 252, 255)
 COL_LIMIT_RING = (215, 40, 40)
 COL_LIMIT_TEXT = (20, 20, 25)
 
-SPEED_LIMIT = 100  # hardcoded limit (km/h)
+DEFAULT_SPEED_LIMIT = 100  # fallback limit when no sign detected (km/h)
+
+# NPU detection IPC file -- C inference process writes results here
+NPU_DETECT_FILE = "/tmp/ai_hud_detect"
+NPU_POLL_INTERVAL = 0.5  # seconds between file reads
 
 # ---------------------------------------------------------------------------
 # Serial port (raw termios, from gps_reader.py)
@@ -147,6 +151,72 @@ class GPSState:
         elif t == "GGA":
             self.fix_quality = parsed.get("fix_quality", 0)
             self.satellites = parsed.get("satellites", 0)
+
+# ---------------------------------------------------------------------------
+# NPU detection state (IPC with C inference process)
+# ---------------------------------------------------------------------------
+
+class DetectionState:
+    """Hold latest NPU detection results read from IPC file.
+
+    The C inference process (rknn_detect) writes detection results to
+    /tmp/ai_hud_detect in a simple key=value format:
+
+        speed_limit=60
+        camera=1
+        confidence=0.85
+        timestamp=1234567890
+
+    This class polls that file periodically and updates state.
+    """
+
+    def __init__(self, filepath=NPU_DETECT_FILE):
+        self.filepath = filepath
+        self.speed_limit = DEFAULT_SPEED_LIMIT
+        self.camera_detected = False
+        self.confidence = 0.0
+        self.last_poll = 0
+        self._last_mtime = 0
+
+    def poll(self):
+        """Read detection file if changed. Called from main loop."""
+        now = time.time()
+        if now - self.last_poll < NPU_POLL_INTERVAL:
+            return
+        self.last_poll = now
+
+        try:
+            st = os.stat(self.filepath)
+            if st.st_mtime == self._last_mtime:
+                return  # file unchanged
+            self._last_mtime = st.st_mtime
+
+            with open(self.filepath, "r") as f:
+                for line in f:
+                    line = line.strip()
+                    if "=" not in line:
+                        continue
+                    key, val = line.split("=", 1)
+                    if key == "speed_limit":
+                        try:
+                            self.speed_limit = int(val)
+                        except ValueError:
+                            pass
+                    elif key == "camera":
+                        self.camera_detected = val.strip() == "1"
+                    elif key == "confidence":
+                        try:
+                            self.confidence = float(val)
+                        except ValueError:
+                            pass
+        except (OSError, IOError):
+            pass  # file doesn't exist yet -- NPU not running
+
+    @property
+    def active(self):
+        """True if NPU has ever written results."""
+        return self._last_mtime > 0
+
 
 # ---------------------------------------------------------------------------
 # Bitmap font - digits 0-9, letters, symbols
@@ -974,11 +1044,12 @@ SIGN_CX = FB_W - 65
 SIGN_CY = FB_H // 2 + 10
 
 
-def _build_base_layer(fb):
+def _build_base_layer(fb, speed_limit=DEFAULT_SPEED_LIMIT):
     """Pre-render the static background layer: bg + arc track + limit sign.
 
-    Call once at startup.  Returns a snapshot (bytearray copy) of the
-    buffer that can be blitted back each frame instead of redrawing.
+    Call once at startup or when speed_limit changes.  Returns a snapshot
+    (bytearray copy) of the buffer that can be blitted back each frame
+    instead of redrawing.
     """
     fb.clear(COL_BG)
 
@@ -990,7 +1061,7 @@ def _build_base_layer(fb):
     fb.fill_circle(SIGN_CX, SIGN_CY, SIGN_R, COL_LIMIT_RING)
     fb.fill_circle(SIGN_CX, SIGN_CY, SIGN_R - 5, COL_LIMIT_BG)
 
-    limit_str = str(SPEED_LIMIT)
+    limit_str = str(speed_limit)
     limit_scale = 2
     limit_tw = fb.measure_text(limit_str, limit_scale)
     limit_th = GLYPH_H * limit_scale
@@ -1007,7 +1078,8 @@ def _build_base_layer(fb):
 class HUDState:
     """Track previous frame state for delta rendering."""
     __slots__ = ('speed_int', 'over_limit', 'valid', 'satellites',
-                 'fix_quality', 'base_layer')
+                 'fix_quality', 'base_layer', 'speed_limit',
+                 'camera_detected')
 
     def __init__(self):
         self.speed_int = -1
@@ -1016,39 +1088,53 @@ class HUDState:
         self.satellites = -1
         self.fix_quality = -1
         self.base_layer = None
+        self.speed_limit = -1
+        self.camera_detected = False
 
 
-def render_hud(fb, gps, state=None):
+def render_hud(fb, gps, state=None, detect=None):
     """Render the full HUD frame - mockup v3 style.
 
     If *state* is provided (HUDState), uses cached base layer and skips
     rendering when nothing changed.  On first call state.base_layer is
     built automatically.
 
+    If *detect* is provided (DetectionState), speed limit and camera
+    warning are updated dynamically from NPU inference results.
+
     Layout (matching mockup v3):
     - Arc gauge: centered, radius 200, 150deg-390deg
     - Speed number: huge (scale=6), centered in arc
-    - Limit sign: right side, radius 52
+    - Limit sign: right side, radius 52 (dynamic from NPU)
     - km/h label: below speed number
+    - Camera warning badge: top center (when detected)
     - Satellite info + status dot: bottom left
     """
 
     speed = gps.speed_kmh if gps.valid else 0.0
     speed_int = int(round(speed))
-    over_limit = speed_int > SPEED_LIMIT
+
+    # Dynamic speed limit from NPU detection
+    current_limit = detect.speed_limit if detect else DEFAULT_SPEED_LIMIT
+    camera = detect.camera_detected if detect else False
+
+    over_limit = speed_int > current_limit
 
     # --- Delta check: skip full redraw if nothing changed ---
     if state is not None:
+        limit_changed = state.speed_limit != current_limit
         if (state.speed_int == speed_int and
                 state.over_limit == over_limit and
                 state.valid == gps.valid and
                 state.satellites == gps.satellites and
-                state.fix_quality == gps.fix_quality):
+                state.fix_quality == gps.fix_quality and
+                state.camera_detected == camera and
+                not limit_changed):
             return  # nothing changed, skip render
 
-        # Restore cached base layer (bg + track + sign + separator)
-        if state.base_layer is None:
-            state.base_layer = _build_base_layer(fb)
+        # Rebuild base layer if speed limit changed (sign needs redraw)
+        if limit_changed or state.base_layer is None:
+            state.base_layer = _build_base_layer(fb, current_limit)
         fb.buf[:] = state.base_layer
 
         state.speed_int = speed_int
@@ -1056,6 +1142,8 @@ def render_hud(fb, gps, state=None):
         state.valid = gps.valid
         state.satellites = gps.satellites
         state.fix_quality = gps.fix_quality
+        state.speed_limit = current_limit
+        state.camera_detected = camera
     else:
         # No state tracking -- full render every frame
         fb.clear(COL_BG)
@@ -1063,7 +1151,7 @@ def render_hud(fb, gps, state=None):
                           COL_GAUGE_BG, width=ARC_WIDTH)
         fb.fill_circle(SIGN_CX, SIGN_CY, SIGN_R, COL_LIMIT_RING)
         fb.fill_circle(SIGN_CX, SIGN_CY, SIGN_R - 5, COL_LIMIT_BG)
-        limit_str = str(SPEED_LIMIT)
+        limit_str = str(current_limit)
         limit_scale = 2
         limit_tw = fb.measure_text(limit_str, limit_scale)
         limit_th = GLYPH_H * limit_scale
@@ -1091,7 +1179,7 @@ def render_hud(fb, gps, state=None):
     # --- Re-draw limit sign on top of arc (arc overlaps sign at 349-378 deg) ---
     fb.fill_circle(SIGN_CX, SIGN_CY, SIGN_R, COL_LIMIT_RING)
     fb.fill_circle(SIGN_CX, SIGN_CY, SIGN_R - 5, COL_LIMIT_BG)
-    _limit_str = str(SPEED_LIMIT)
+    _limit_str = str(current_limit)
     _limit_tw = fb.measure_text(_limit_str, 2)
     fb.draw_text(_limit_str, SIGN_CX - _limit_tw // 2,
                  SIGN_CY - GLYPH_H, COL_LIMIT_TEXT, 2)
@@ -1122,30 +1210,59 @@ def render_hud(fb, gps, state=None):
         hint_y = speed_y - GLYPH_H * hint_scale - 8
         fb.draw_text(hint_str, hint_x, hint_y, COL_DIM, hint_scale)
 
-    # --- "OVER SPEED" alert bar when speeding ---
-    if over_limit:
+    # --- Alert bar (bottom, context-sensitive) ---
+    show_alert = over_limit or camera
+    if show_alert:
         bar_h = 44
         bar_y = FB_H - bar_h - 68
         bar_x = 24
         bar_w = FB_W - 48
-        # Dark red background
-        bar_bg = (COL_RED[0] // 6, COL_RED[1] // 6, COL_RED[2] // 6)
+
+        # Choose alert color and text based on situation
+        if camera and over_limit:
+            alert_color = COL_RED
+            alert_text = "SLOW DOWN"
+        elif over_limit:
+            alert_color = COL_RED
+            alert_text = "OVER SPEED"
+        else:
+            alert_color = (255, 185, 35)  # amber
+            alert_text = "CAMERA AHEAD"
+
+        # Dark background
+        bar_bg = (alert_color[0] // 6, alert_color[1] // 6, alert_color[2] // 6)
         fb.fill_rect(bar_x, bar_y, bar_w, bar_h, bar_bg)
-        # Red border rectangle
-        fb.fill_rect(bar_x, bar_y, bar_w, 2, COL_RED)
-        fb.fill_rect(bar_x, bar_y + bar_h - 2, bar_w, 2, COL_RED)
-        fb.fill_rect(bar_x, bar_y, 2, bar_h, COL_RED)
-        fb.fill_rect(bar_x + bar_w - 2, bar_y, 2, bar_h, COL_RED)
-        # Three red warning bars inside (visual warning pattern)
-        stripe_w = 30
-        stripe_gap = 20
-        total_w = stripe_w * 3 + stripe_gap * 2
-        stripe_x = bar_x + (bar_w - total_w) // 2
-        stripe_y = bar_y + 10
-        stripe_h = bar_h - 20
-        for i in range(3):
-            sx = stripe_x + i * (stripe_w + stripe_gap)
-            fb.fill_rect(sx, stripe_y, stripe_w, stripe_h, COL_RED)
+        # Border rectangle
+        fb.fill_rect(bar_x, bar_y, bar_w, 2, alert_color)
+        fb.fill_rect(bar_x, bar_y + bar_h - 2, bar_w, 2, alert_color)
+        fb.fill_rect(bar_x, bar_y, 2, bar_h, alert_color)
+        fb.fill_rect(bar_x + bar_w - 2, bar_y, 2, bar_h, alert_color)
+        # Alert text centered
+        alert_tw = fb.measure_text(alert_text, 1)
+        alert_tx = bar_x + (bar_w - alert_tw) // 2
+        alert_ty = bar_y + (bar_h - GLYPH_H) // 2
+        fb.draw_text(alert_text, alert_tx, alert_ty, alert_color, 1)
+
+    # --- Camera warning badge (top center, when NPU detects camera) ---
+    if camera:
+        cam_color = COL_RED if over_limit else (255, 185, 35)  # amber
+        cam_bg = (cam_color[0] // 5, cam_color[1] // 5, cam_color[2] // 5)
+        badge_w, badge_h = 160, 36
+        badge_x = ARC_CX - badge_w // 2
+        badge_y = 82
+        # Dark background pill
+        fb.fill_rect(badge_x, badge_y, badge_w, badge_h, cam_bg)
+        # Border (top, bottom, left, right)
+        fb.fill_rect(badge_x, badge_y, badge_w, 2, cam_color)
+        fb.fill_rect(badge_x, badge_y + badge_h - 2, badge_w, 2, cam_color)
+        fb.fill_rect(badge_x, badge_y, 2, badge_h, cam_color)
+        fb.fill_rect(badge_x + badge_w - 2, badge_y, 2, badge_h, cam_color)
+        # "CAMERA" text centered in badge
+        cam_text = "CAMERA"
+        cam_tw = fb.measure_text(cam_text, 1)
+        cam_tx = badge_x + (badge_w - cam_tw) // 2
+        cam_ty = badge_y + (badge_h - GLYPH_H) // 2
+        fb.draw_text(cam_text, cam_tx, cam_ty, cam_color, 1)
 
     # --- Satellite info (bottom left) ---
     sat_str = "SAT " + str(gps.satellites)
@@ -1175,12 +1292,14 @@ def main():
 
     print(f"HUD Live - GPS: {device} @ {baudrate} baud")
     print(f"Framebuffer: {FB_DEV} ({FB_W}x{FB_H})")
-    print(f"Speed limit: {SPEED_LIMIT} km/h")
+    print(f"Default speed limit: {DEFAULT_SPEED_LIMIT} km/h")
+    print(f"NPU detection IPC: {NPU_DETECT_FILE}")
     print("Press Ctrl+C to stop\n")
 
     fb = Framebuffer(FB_DEV)
     gps_fd = open_serial(device, baudrate)
     gps = GPSState()
+    detect = DetectionState()
     nmea_buf = b""
     hud_state = HUDState()
 
@@ -1190,7 +1309,7 @@ def main():
     }
 
     # Initial render (before any GPS data - builds base layer cache)
-    render_hud(fb, gps, hud_state)
+    render_hud(fb, gps, hud_state, detect)
 
     try:
         while True:
@@ -1229,10 +1348,13 @@ def main():
 
             # Refresh display once per GPS cycle (on RMC)
             if rmc_seen:
-                render_hud(fb, gps, hud_state)
+                detect.poll()  # check for NPU detection updates
+                render_hud(fb, gps, hud_state, detect)
                 spd = gps.speed_kmh if gps.valid else 0.0
                 status = "FIX" if gps.valid else "---"
-                print(f"\r[{status}] {spd:5.1f} km/h | SAT: {gps.satellites}",
+                lim = detect.speed_limit
+                cam = " CAM" if detect.camera_detected else ""
+                print(f"\r[{status}] {spd:5.1f} km/h | LIM:{lim} | SAT:{gps.satellites}{cam}",
                       end="", flush=True)
 
     except KeyboardInterrupt:

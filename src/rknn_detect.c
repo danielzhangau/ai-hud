@@ -23,6 +23,7 @@
 
 #include "rknn_detect.h"
 #include "postprocess.h"
+#include "hud_ipc.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -422,6 +423,18 @@ static void *inference_thread_func(void *arg) {
                 pthread_mutex_lock(&ctx->result_mutex);
                 memcpy(&ctx->det_result, &local_result, sizeof(local_result));
                 pthread_mutex_unlock(&ctx->result_mutex);
+
+                /* Write detection results to IPC file for HUD display */
+                if (local_result.count > 0) {
+                    int cls_ids[DETECT_MAX_COUNT];
+                    float confs[DETECT_MAX_COUNT];
+                    for (int i = 0; i < local_result.count; i++) {
+                        cls_ids[i] = local_result.results[i].class_id;
+                        confs[i] = local_result.results[i].prop;
+                    }
+                    hud_ipc_update_from_detections(
+                        local_result.count, cls_ids, confs);
+                }
             }
         }
 
