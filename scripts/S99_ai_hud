@@ -49,12 +49,11 @@ start() {
     show_splash
     sleep 3
 
-    # Launch hud_live.py in background
+    # Launch hud_live.py (double-fork to fully detach from caller session)
     if [ -f "$DAEMON" ]; then
         log "Starting $DAEMON $DAEMON_ARGS"
-        python3 "$DAEMON" $DAEMON_ARGS >> "$LOGFILE" 2>&1 &
-        echo $! > "$PIDFILE"
-        log "Started with PID $(cat $PIDFILE)"
+        ( nohup python3 "$DAEMON" $DAEMON_ARGS >> "$LOGFILE" 2>&1 & echo $! > "$PIDFILE" )
+        log "Started with PID $(cat $PIDFILE 2>/dev/null)"
     else
         log "ERROR: $DAEMON not found, cannot start"
     fi
@@ -64,26 +63,15 @@ stop() {
     log "===== STOP ====="
 
     if [ -f "$PIDFILE" ]; then
-        PID=$(cat "$PIDFILE")
-        if kill -0 "$PID" 2>/dev/null; then
-            log "Stopping hud_live.py (PID $PID)"
-            kill "$PID"
-            sleep 1
-            # Force kill if still running
-            if kill -0 "$PID" 2>/dev/null; then
-                log "Force killing PID $PID"
-                kill -9 "$PID"
-            fi
-        else
-            log "Process $PID not running"
-        fi
+        kill "$(cat $PIDFILE)" 2>/dev/null
+        sleep 1
+        kill -9 "$(cat $PIDFILE)" 2>/dev/null
+        log "Stopped hud_live.py"
         rm -f "$PIDFILE"
     else
         # Fallback: kill by process name
-        if pidof python3 > /dev/null 2>&1; then
-            pkill -f "hud_live.py" 2>/dev/null
-            log "Killed hud_live.py by name"
-        fi
+        pkill -f "hud_live.py" 2>/dev/null
+        log "Killed hud_live.py by name"
     fi
 
     # Clear the framebuffer to black

@@ -59,7 +59,7 @@ jobs:
           chmod +x build.sh
           # Use the non-interactive lunch command for RV1106G3 + Buildroot
           # BoardConfig file: BoardConfig-RV1106G3-BUILDROOT
-          ./build.sh lunch BoardConfig-RV1106G3-BUILDROOT
+          echo "5" | ./build.sh lunch
           ./build.sh
 
       # ---- Upload firmware artifacts ----

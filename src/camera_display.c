@@ -66,7 +66,7 @@ static volatile int g_running = 1;
 
 static void signal_handler(int sig) {
     (void)sig;
-    printf("[INFO] Caught signal %d, shutting down...\n", sig);
+    /* Only set flag here -- printf is not async-signal-safe */
     g_running = 0;
 }
 
@@ -228,9 +228,10 @@ static int vpss_init(void) {
 }
 
 static void vpss_deinit(void) {
-    RK_MPI_VPSS_StopGrp(VPSS_GRP_ID);
+    /* Disable channels before stopping group (RKMPI requirement) */
     RK_MPI_VPSS_DisableChn(VPSS_GRP_ID, VPSS_CHN_NPU);
     RK_MPI_VPSS_DisableChn(VPSS_GRP_ID, VPSS_CHN_DISPLAY);
+    RK_MPI_VPSS_StopGrp(VPSS_GRP_ID);
     RK_MPI_VPSS_DestroyGrp(VPSS_GRP_ID);
     printf("[INFO] VPSS deinitialized\n");
 }
@@ -471,10 +472,13 @@ int main(int argc, char *argv[]) {
     printf("[INFO] Press Ctrl+C to stop\n");
 
     /* ---- Step 4: Start FPS monitor thread ---- */
+    int fps_thread_created = 0;
     ret = pthread_create(&fps_tid, NULL, fps_monitor_thread, NULL);
     if (ret != 0) {
         printf("[WARN] Failed to create FPS monitor thread: %s\n", strerror(ret));
         /* Non-fatal, continue without monitoring */
+    } else {
+        fps_thread_created = 1;
     }
 
     /* ---- Step 5: Main loop -- wait for exit signal ---- */
@@ -494,7 +498,8 @@ int main(int argc, char *argv[]) {
     printf("[INFO] Shutting down pipeline...\n");
 
     /* ---- Step 6: Cleanup (reverse order) ---- */
-    pthread_join(fps_tid, NULL);
+    if (fps_thread_created)
+        pthread_join(fps_tid, NULL);
 
     unbind_pipeline();
 
