@@ -1,0 +1,46 @@
+name: Build HUD
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install cross-compilation toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-arm-linux-gnueabihf g++-arm-linux-gnueabihf
+
+      - name: Verify toolchain
+        run: |
+          arm-linux-gnueabihf-gcc --version
+          echo "Cross-compiler ready for RV1106 (ARM Cortex-A7)"
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install Python dependencies
+        run: pip install Pillow
+
+      - name: Generate HUD mockups
+        run: |
+          cd src
+          python3 generate_hud_mockups_v3.py
+          python3 generate_splash.py
+
+      - name: Upload mockups
+        uses: actions/upload-artifact@v4
+        with:
+          name: hud-mockups
+          path: mockups/*.png

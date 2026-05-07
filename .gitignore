@@ -1,0 +1,19 @@
+# Build artifacts
+*.bin
+*.o
+*.elf
+build/
+
+# macOS
+.DS_Store
+
+# Python
+__pycache__/
+*.pyc
+
+# IDE
+.vscode/
+.idea/
+
+# Empty dirs
+sysroot/
