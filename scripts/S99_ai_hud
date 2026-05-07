@@ -1,0 +1,116 @@
+#!/bin/sh
+# AI-HUD auto-start script for Buildroot init.d
+
+DAEMON="/root/hud_live.py"
+DAEMON_ARGS="/dev/ttyS4 9600"
+PIDFILE="/var/run/ai_hud.pid"
+LOGFILE="/var/log/ai_hud.log"
+SPLASH_BIN="/root/splash_raw.bin"
+FB_DEV="/dev/fb0"
+
+log() {
+    echo "$(date '+%Y-%m-%d %H:%M:%S') $1" >> "$LOGFILE"
+}
+
+kill_display_blockers() {
+    # Stop processes that may occupy the display
+    for proc in rkipc simple_vi_get_frame_send_vo_rv1106; do
+        if pidof "$proc" > /dev/null 2>&1; then
+            log "Stopping $proc ..."
+            killall "$proc" > /dev/null 2>&1
+            sleep 1
+        fi
+    done
+}
+
+show_splash() {
+    if [ -f "$SPLASH_BIN" ] && [ -e "$FB_DEV" ]; then
+        log "Displaying splash screen"
+        cat "$SPLASH_BIN" > "$FB_DEV"
+    else
+        log "WARNING: splash ($SPLASH_BIN) or framebuffer ($FB_DEV) not found, skipping splash"
+    fi
+}
+
+clear_screen() {
+    if [ -e "$FB_DEV" ]; then
+        log "Clearing framebuffer"
+        dd if=/dev/zero of="$FB_DEV" bs=1k 2>/dev/null
+    fi
+}
+
+start() {
+    log "===== START ====="
+
+    # Make sure display-blocking processes are stopped first
+    kill_display_blockers
+
+    # Show splash screen and hold for 3 seconds
+    show_splash
+    sleep 3
+
+    # Launch hud_live.py in background
+    if [ -f "$DAEMON" ]; then
+        log "Starting $DAEMON $DAEMON_ARGS"
+        python3 "$DAEMON" $DAEMON_ARGS >> "$LOGFILE" 2>&1 &
+        echo $! > "$PIDFILE"
+        log "Started with PID $(cat $PIDFILE)"
+    else
+        log "ERROR: $DAEMON not found, cannot start"
+    fi
+}
+
+stop() {
+    log "===== STOP ====="
+
+    if [ -f "$PIDFILE" ]; then
+        PID=$(cat "$PIDFILE")
+        if kill -0 "$PID" 2>/dev/null; then
+            log "Stopping hud_live.py (PID $PID)"
+            kill "$PID"
+            sleep 1
+            # Force kill if still running
+            if kill -0 "$PID" 2>/dev/null; then
+                log "Force killing PID $PID"
+                kill -9 "$PID"
+            fi
+        else
+            log "Process $PID not running"
+        fi
+        rm -f "$PIDFILE"
+    else
+        # Fallback: kill by process name
+        if pidof python3 > /dev/null 2>&1; then
+            pkill -f "hud_live.py" 2>/dev/null
+            log "Killed hud_live.py by name"
+        fi
+    fi
+
+    # Clear the framebuffer to black
+    clear_screen
+    log "Stopped"
+}
+
+restart() {
+    stop
+    sleep 1
+    start
+}
+
+case "$1" in
+    start)
+        start
+        ;;
+    stop)
+        stop
+        ;;
+    restart)
+        restart
+        ;;
+    *)
+        echo "Usage: $0 {start|stop|restart}"
+        exit 1
+        ;;
+esac
+
+exit 0

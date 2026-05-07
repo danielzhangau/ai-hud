@@ -26,15 +26,18 @@ FB_H = 480
 FB_BPP = 4  # bytes per pixel (XRGB8888)
 FB_STRIDE = 1920  # bytes per row = 480 * 4
 
-# Colors (R, G, B)
+# Colors (R, G, B) - matching mockup v3
 COL_BG = (8, 10, 15)
 COL_WHITE = (245, 248, 255)
 COL_RED = (255, 55, 60)
-COL_DIM = (80, 85, 95)
-COL_GREEN = (50, 205, 100)
-COL_LIMIT_BG = (255, 255, 255)
-COL_LIMIT_RING = (220, 30, 35)
-COL_LIMIT_TEXT = (30, 30, 30)
+COL_DIM = (55, 60, 75)
+COL_GREEN = (50, 220, 120)
+COL_ARC_BLUE = (60, 140, 255)
+COL_ARC_RED = (255, 55, 60)
+COL_GAUGE_BG = (30, 34, 45)
+COL_LIMIT_BG = (252, 252, 255)
+COL_LIMIT_RING = (215, 40, 40)
+COL_LIMIT_TEXT = (20, 20, 25)
 
 SPEED_LIMIT = 100  # hardcoded limit (km/h)
 
@@ -788,26 +791,151 @@ class Framebuffer:
             offset = py * FB_STRIDE + x0 * FB_BPP
             self.buf[offset:offset + len(row_bytes)] = row_bytes
 
+    def draw_thick_arc(self, cx, cy, radius, start_deg, end_deg, color, width=10):
+        """Draw a thick arc using optimized scanline ring traversal.
+
+        Angles in degrees, measured clockwise from 3-o'clock (standard).
+        start_deg=150, end_deg=390 gives a bottom-open arc like the mockup.
+        Width is the arc thickness in pixels.
+
+        Optimization strategy: for each scanline row, compute the two
+        horizontal spans of the ring (left segment and right segment),
+        then only check angles for those pixels. This avoids scanning
+        the entire bounding box.
+        """
+        r, g, b = color
+        pixel = struct.pack('BBBB', b, g, r, 0)
+        buf = self.buf
+
+        TWO_PI = 2 * math.pi
+        s_norm = math.radians(start_deg) % TWO_PI
+        e_norm = math.radians(end_deg) % TWO_PI
+        wraps = e_norm <= s_norm  # arc crosses 0-degree line
+
+        r_inner = max(0, radius - width // 2)
+        r_outer = radius + (width - width // 2)
+        ri2 = r_inner * r_inner
+        ro2 = r_outer * r_outer
+
+        atan2 = math.atan2
+        sqrt = math.sqrt
+        bpp = FB_BPP
+        stride = FB_STRIDE
+        fb_w = FB_W
+        fb_h = FB_H
+
+        for dy in range(-r_outer, r_outer + 1):
+            py = cy + dy
+            if py < 0 or py >= fb_h:
+                continue
+            dy2 = dy * dy
+            if dy2 > ro2:
+                continue
+
+            # Outer circle horizontal extent at this row
+            dx_outer = int(sqrt(ro2 - dy2))
+
+            # Inner circle horizontal extent (if row intersects inner circle)
+            if dy2 < ri2:
+                dx_inner = int(sqrt(ri2 - dy2))
+                # Ring has two horizontal segments:
+                #   left:  [cx - dx_outer, cx - dx_inner]
+                #   right: [cx + dx_inner, cx + dx_outer]
+                segments = [
+                    (max(0, cx - dx_outer), min(fb_w - 1, cx - dx_inner)),
+                    (max(0, cx + dx_inner), min(fb_w - 1, cx + dx_outer)),
+                ]
+            else:
+                # Row is above/below inner circle, entire outer span is ring
+                segments = [
+                    (max(0, cx - dx_outer), min(fb_w - 1, cx + dx_outer)),
+                ]
+
+            row_off = py * stride
+            for seg_x0, seg_x1 in segments:
+                if seg_x0 > seg_x1:
+                    continue
+                for px in range(seg_x0, seg_x1 + 1):
+                    dx = px - cx
+                    # Verify ring membership (handles rounding at edges)
+                    d2 = dx * dx + dy2
+                    if d2 < ri2 or d2 > ro2:
+                        continue
+                    # Angle check
+                    angle = atan2(dy, dx) % TWO_PI
+                    if wraps:
+                        if angle < s_norm and angle > e_norm:
+                            continue
+                    else:
+                        if angle < s_norm or angle > e_norm:
+                            continue
+                    off = row_off + px * bpp
+                    buf[off:off + 4] = pixel
+
     def draw_text(self, text, x, y, color, scale=1):
         """Render text at (x, y) with given color and scale.
 
         Returns the total width drawn (for centering calculations).
+        Optimized: uses row-span batching instead of per-pixel set_pixel.
         """
+        r, g, b = color
+        pixel = struct.pack('BBBB', b, g, r, 0)
+        buf = self.buf
+        stride = FB_STRIDE
+        bpp = FB_BPP
+        fb_w = FB_W
+        fb_h = FB_H
+
         cx = x
         for ch in text:
             pixels = _PARSED.get(ch)
             if pixels is None:
-                # Unknown character, skip with space width
                 cx += (GLYPH_W // 2 + 2) * scale
                 continue
-            for gr, gc in pixels:
-                # Scale each glyph pixel into a scale x scale block
-                for sy in range(scale):
-                    for sx in range(scale):
-                        self.set_pixel(cx + gc * scale + sx,
-                                       y + gr * scale + sy, color)
+            if scale == 1:
+                # Fast path: single pixel per glyph pixel
+                for gr, gc in pixels:
+                    px = cx + gc
+                    py = y + gr
+                    if 0 <= px < fb_w and 0 <= py < fb_h:
+                        off = py * stride + px * bpp
+                        buf[off:off + 4] = pixel
+            else:
+                # Group glyph pixels by row to enable row-span writes
+                # Build horizontal spans per scaled row
+                row_spans = {}
+                for gr, gc in pixels:
+                    for sy in range(scale):
+                        py = y + gr * scale + sy
+                        if py < 0 or py >= fb_h:
+                            continue
+                        px_start = cx + gc * scale
+                        px_end = px_start + scale
+                        if py not in row_spans:
+                            row_spans[py] = []
+                        row_spans[py].append((px_start, px_end))
+
+                for py, spans in row_spans.items():
+                    # Sort and merge overlapping/adjacent spans
+                    spans.sort()
+                    merged = [spans[0]]
+                    for s, e in spans[1:]:
+                        if s <= merged[-1][1]:
+                            merged[-1] = (merged[-1][0], max(merged[-1][1], e))
+                        else:
+                            merged.append((s, e))
+                    row_off = py * stride
+                    for s, e in merged:
+                        s_clamp = max(0, s)
+                        e_clamp = min(fb_w, e)
+                        if s_clamp >= e_clamp:
+                            continue
+                        n = e_clamp - s_clamp
+                        off = row_off + s_clamp * bpp
+                        buf[off:off + n * bpp] = pixel * n
+
             aw = _glyph_actual_width(ch)
-            cx += (aw + 2) * scale  # 2px base gap between chars
+            cx += (aw + 2) * scale
         return cx - x
 
     def measure_text(self, text, scale=1):
@@ -827,83 +955,213 @@ class Framebuffer:
         os.write(self.fd, bytes(self.buf))
 
 # ---------------------------------------------------------------------------
-# HUD rendering
+# HUD rendering with caching
 # ---------------------------------------------------------------------------
 
-def render_hud(fb, gps):
-    """Render the full HUD frame."""
+# Arc gauge constants (shared between cache builder and renderer)
+ARC_CX = FB_W // 2
+ARC_CY = FB_H // 2
+ARC_R = 200
+ARC_WIDTH = 10
+ARC_START = 150   # degrees
+ARC_END_FULL = 390  # degrees
+ARC_SPAN = ARC_END_FULL - ARC_START  # 240 degrees
+MAX_SPEED = 160
+
+# Limit sign constants
+SIGN_R = 52
+SIGN_CX = FB_W - 65
+SIGN_CY = FB_H // 2 + 10
+
+
+def _build_base_layer(fb):
+    """Pre-render the static background layer: bg + arc track + limit sign.
+
+    Call once at startup.  Returns a snapshot (bytearray copy) of the
+    buffer that can be blitted back each frame instead of redrawing.
+    """
     fb.clear(COL_BG)
+
+    # Arc gauge background track
+    fb.draw_thick_arc(ARC_CX, ARC_CY, ARC_R, ARC_START, ARC_END_FULL,
+                      COL_GAUGE_BG, width=ARC_WIDTH)
+
+    # Speed limit sign - red ring + white fill + number
+    fb.fill_circle(SIGN_CX, SIGN_CY, SIGN_R, COL_LIMIT_RING)
+    fb.fill_circle(SIGN_CX, SIGN_CY, SIGN_R - 5, COL_LIMIT_BG)
+
+    limit_str = str(SPEED_LIMIT)
+    limit_scale = 2
+    limit_tw = fb.measure_text(limit_str, limit_scale)
+    limit_th = GLYPH_H * limit_scale
+    limit_tx = SIGN_CX - limit_tw // 2
+    limit_ty = SIGN_CY - limit_th // 2
+    fb.draw_text(limit_str, limit_tx, limit_ty, COL_LIMIT_TEXT, limit_scale)
+
+    # Thin separator line above satellite info
+    fb.fill_rect(20, FB_H - 55, FB_W - 40, 1, COL_DIM)
+
+    return bytearray(fb.buf)
+
+
+class HUDState:
+    """Track previous frame state for delta rendering."""
+    __slots__ = ('speed_int', 'over_limit', 'valid', 'satellites',
+                 'fix_quality', 'base_layer')
+
+    def __init__(self):
+        self.speed_int = -1
+        self.over_limit = False
+        self.valid = False
+        self.satellites = -1
+        self.fix_quality = -1
+        self.base_layer = None
+
+
+def render_hud(fb, gps, state=None):
+    """Render the full HUD frame - mockup v3 style.
+
+    If *state* is provided (HUDState), uses cached base layer and skips
+    rendering when nothing changed.  On first call state.base_layer is
+    built automatically.
+
+    Layout (matching mockup v3):
+    - Arc gauge: centered, radius 200, 150deg-390deg
+    - Speed number: huge (scale=6), centered in arc
+    - Limit sign: right side, radius 52
+    - km/h label: below speed number
+    - Satellite info + status dot: bottom left
+    """
 
     speed = gps.speed_kmh if gps.valid else 0.0
     speed_int = int(round(speed))
     over_limit = speed_int > SPEED_LIMIT
 
-    # -- Speed number (large, centered) --
-    speed_str = str(speed_int)
-    speed_scale = 3  # 16*3=48px wide base, 24*3=72px tall
-    speed_w = fb.measure_text(speed_str, speed_scale)
-    # Center horizontally (shifted slightly left to leave room for limit sign)
-    speed_x = (FB_W - speed_w) // 2 - 40
-    speed_y = (FB_H - GLYPH_H * speed_scale) // 2 - 20
+    # --- Delta check: skip full redraw if nothing changed ---
+    if state is not None:
+        if (state.speed_int == speed_int and
+                state.over_limit == over_limit and
+                state.valid == gps.valid and
+                state.satellites == gps.satellites and
+                state.fix_quality == gps.fix_quality):
+            return  # nothing changed, skip render
+
+        # Restore cached base layer (bg + track + sign + separator)
+        if state.base_layer is None:
+            state.base_layer = _build_base_layer(fb)
+        fb.buf[:] = state.base_layer
+
+        state.speed_int = speed_int
+        state.over_limit = over_limit
+        state.valid = gps.valid
+        state.satellites = gps.satellites
+        state.fix_quality = gps.fix_quality
+    else:
+        # No state tracking -- full render every frame
+        fb.clear(COL_BG)
+        fb.draw_thick_arc(ARC_CX, ARC_CY, ARC_R, ARC_START, ARC_END_FULL,
+                          COL_GAUGE_BG, width=ARC_WIDTH)
+        fb.fill_circle(SIGN_CX, SIGN_CY, SIGN_R, COL_LIMIT_RING)
+        fb.fill_circle(SIGN_CX, SIGN_CY, SIGN_R - 5, COL_LIMIT_BG)
+        limit_str = str(SPEED_LIMIT)
+        limit_scale = 2
+        limit_tw = fb.measure_text(limit_str, limit_scale)
+        limit_th = GLYPH_H * limit_scale
+        fb.draw_text(limit_str, SIGN_CX - limit_tw // 2,
+                     SIGN_CY - limit_th // 2, COL_LIMIT_TEXT, limit_scale)
+        fb.fill_rect(20, FB_H - 55, FB_W - 40, 1, COL_DIM)
+
+    # --- Colors based on state ---
     speed_color = COL_RED if over_limit else COL_WHITE
+    arc_color = COL_ARC_RED if over_limit else COL_ARC_BLUE
+
+    # --- Active arc (proportional to speed) ---
+    pct = min(speed_int / MAX_SPEED, 1.0) if MAX_SPEED > 0 else 0.0
+    if pct > 0.005:
+        active_end = ARC_START + pct * ARC_SPAN
+        fb.draw_thick_arc(ARC_CX, ARC_CY, ARC_R, ARC_START, active_end,
+                          arc_color, width=ARC_WIDTH)
+
+        # Small filled dot at the tip of the active arc
+        tip_rad = math.radians(active_end)
+        tip_x = int(ARC_CX + ARC_R * math.cos(tip_rad))
+        tip_y = int(ARC_CY + ARC_R * math.sin(tip_rad))
+        fb.fill_circle(tip_x, tip_y, 6, arc_color)
+
+    # --- Re-draw limit sign on top of arc (arc overlaps sign at 349-378 deg) ---
+    fb.fill_circle(SIGN_CX, SIGN_CY, SIGN_R, COL_LIMIT_RING)
+    fb.fill_circle(SIGN_CX, SIGN_CY, SIGN_R - 5, COL_LIMIT_BG)
+    _limit_str = str(SPEED_LIMIT)
+    _limit_tw = fb.measure_text(_limit_str, 2)
+    fb.draw_text(_limit_str, SIGN_CX - _limit_tw // 2,
+                 SIGN_CY - GLYPH_H, COL_LIMIT_TEXT, 2)
+
+    # --- Speed number (huge, centered, shifted slightly left) ---
+    speed_str = str(speed_int)
+    speed_scale = 6  # 16*6=96px wide per glyph, 24*6=144px tall
+    speed_w = fb.measure_text(speed_str, speed_scale)
+    speed_h = GLYPH_H * speed_scale
+    speed_x = ARC_CX - speed_w // 2 - 15
+    speed_y = ARC_CY - speed_h // 2
     fb.draw_text(speed_str, speed_x, speed_y, speed_color, speed_scale)
 
-    # -- "km/h" label below speed --
+    # --- "km/h" label below speed ---
     unit_str = "km/h"
     unit_scale = 1
     unit_w = fb.measure_text(unit_str, unit_scale)
     unit_x = speed_x + (speed_w - unit_w) // 2
-    unit_y = speed_y + GLYPH_H * speed_scale + 8
+    unit_y = speed_y + speed_h + 6
     fb.draw_text(unit_str, unit_x, unit_y, COL_DIM, unit_scale)
 
-    # -- Speed limit sign (right side) --
-    # Circle with red ring and white fill, number inside
-    limit_cx = 400
-    limit_cy = FB_H // 2 - 10
-    limit_r = 45
+    # --- "NO SAT" hint when no fix ---
+    if not gps.valid:
+        hint_str = "--"
+        hint_scale = 3
+        hint_w = fb.measure_text(hint_str, hint_scale)
+        hint_x = ARC_CX - hint_w // 2 - 15
+        hint_y = speed_y - GLYPH_H * hint_scale - 8
+        fb.draw_text(hint_str, hint_x, hint_y, COL_DIM, hint_scale)
 
-    fb.fill_circle(limit_cx, limit_cy, limit_r, COL_LIMIT_RING)
-    fb.fill_circle(limit_cx, limit_cy, limit_r - 6, COL_LIMIT_BG)
+    # --- "OVER SPEED" alert bar when speeding ---
+    if over_limit:
+        bar_h = 44
+        bar_y = FB_H - bar_h - 68
+        bar_x = 24
+        bar_w = FB_W - 48
+        # Dark red background
+        bar_bg = (COL_RED[0] // 6, COL_RED[1] // 6, COL_RED[2] // 6)
+        fb.fill_rect(bar_x, bar_y, bar_w, bar_h, bar_bg)
+        # Red border rectangle
+        fb.fill_rect(bar_x, bar_y, bar_w, 2, COL_RED)
+        fb.fill_rect(bar_x, bar_y + bar_h - 2, bar_w, 2, COL_RED)
+        fb.fill_rect(bar_x, bar_y, 2, bar_h, COL_RED)
+        fb.fill_rect(bar_x + bar_w - 2, bar_y, 2, bar_h, COL_RED)
+        # Three red warning bars inside (visual warning pattern)
+        stripe_w = 30
+        stripe_gap = 20
+        total_w = stripe_w * 3 + stripe_gap * 2
+        stripe_x = bar_x + (bar_w - total_w) // 2
+        stripe_y = bar_y + 10
+        stripe_h = bar_h - 20
+        for i in range(3):
+            sx = stripe_x + i * (stripe_w + stripe_gap)
+            fb.fill_rect(sx, stripe_y, stripe_w, stripe_h, COL_RED)
 
-    # Limit number centered in circle
-    limit_str = str(SPEED_LIMIT)
-    limit_scale = 2
-    limit_tw = fb.measure_text(limit_str, limit_scale)
-    limit_th = GLYPH_H * limit_scale
-    limit_tx = limit_cx - limit_tw // 2
-    limit_ty = limit_cy - limit_th // 2
-    fb.draw_text(limit_str, limit_tx, limit_ty, COL_LIMIT_TEXT, limit_scale)
-
-    # -- Satellite info (bottom area) --
+    # --- Satellite info (bottom left) ---
     sat_str = "SAT " + str(gps.satellites)
     sat_scale = 1
     sat_w = fb.measure_text(sat_str, sat_scale)
     sat_x = 20
-    sat_y = FB_H - 50
+    sat_y = FB_H - 40
 
-    # Color: green if fix, dim if no fix
     sat_color = COL_GREEN if gps.fix_quality > 0 else COL_DIM
     fb.draw_text(sat_str, sat_x, sat_y, sat_color, sat_scale)
 
-    # -- GPS status indicator (small dot) --
-    dot_x = sat_x + sat_w + 16
+    # GPS status dot
+    dot_x = sat_x + sat_w + 12
     dot_y = sat_y + GLYPH_H // 2
     dot_color = COL_GREEN if gps.valid else COL_RED
-    fb.fill_circle(dot_x, dot_y, 5, dot_color)
-
-    # -- "NO FIX" if invalid --
-    if not gps.valid:
-        nf_str = "--"
-        # Already showing 0 speed; also show text hint
-        hint_str = "NO SAT"
-        hint_scale = 1
-        hint_w = fb.measure_text(hint_str, hint_scale)
-        hint_x = (FB_W - hint_w) // 2 - 40
-        hint_y = speed_y - 30
-        fb.draw_text(hint_str, hint_x, hint_y, COL_DIM, hint_scale)
-
-    # -- Thin separator line --
-    fb.fill_rect(20, FB_H - 65, FB_W - 40, 1, COL_DIM)
+    fb.fill_circle(dot_x, dot_y, 4, dot_color)
 
     fb.flush()
 
@@ -924,14 +1182,15 @@ def main():
     gps_fd = open_serial(device, baudrate)
     gps = GPSState()
     nmea_buf = b""
+    hud_state = HUDState()
 
     parsers = {
         "RMC": parse_gprmc,
         "GGA": parse_gpgga,
     }
 
-    # Initial render (before any GPS data)
-    render_hud(fb, gps)
+    # Initial render (before any GPS data - builds base layer cache)
+    render_hud(fb, gps, hud_state)
 
     try:
         while True:
@@ -970,7 +1229,7 @@ def main():
 
             # Refresh display once per GPS cycle (on RMC)
             if rmc_seen:
-                render_hud(fb, gps)
+                render_hud(fb, gps, hud_state)
                 spd = gps.speed_kmh if gps.valid else 0.0
                 status = "FIX" if gps.valid else "---"
                 print(f"\r[{status}] {spd:5.1f} km/h | SAT: {gps.satellites}",
