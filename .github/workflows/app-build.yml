@@ -1,0 +1,65 @@
+name: App Build
+
+on:
+  push:
+    paths:
+      - 'src/**'
+      - 'CMakeLists.txt'
+      - 'cmake/**'
+      - '.github/workflows/app-build.yml'
+  pull_request:
+    paths:
+      - 'src/**'
+      - 'CMakeLists.txt'
+      - 'cmake/**'
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # ---- Download standalone cross-compilation toolchain ----
+      - name: Download toolchain
+        run: |
+          git clone --depth 1 https://github.com/deerpi/arm-rockchip830-linux-uclibcgnueabihf.git /opt/toolchain
+          echo "Toolchain installed at /opt/toolchain"
+          ls /opt/toolchain/bin/arm-rockchip830-linux-uclibcgnueabihf-gcc
+
+      # ---- Download RKMPI headers and pre-built libraries ----
+      - name: Download RKMPI headers and libraries
+        run: |
+          git clone --depth 1 https://github.com/LuckfoxTECH/luckfox_pico_rkmpi_example.git /opt/rkmpi
+          echo "=== RKMPI headers ==="
+          ls /opt/rkmpi/include/rk_mpi_*.h | head -5
+          echo "=== RKMPI uclibc libs ==="
+          ls /opt/rkmpi/lib/uclibc/lib*.so | head -5
+
+      # ---- Build the application ----
+      - name: Build
+        run: |
+          mkdir -p build && cd build
+          cmake .. \
+            -DCMAKE_TOOLCHAIN_FILE=../cmake/rv1106-toolchain.cmake \
+            -DTOOLCHAIN_DIR=/opt/toolchain \
+            -DRKMPI_DIR=/opt/rkmpi
+          make -j$(nproc) VERBOSE=1
+
+      # ---- Strip and show binary info ----
+      - name: Strip binary
+        run: |
+          /opt/toolchain/bin/arm-rockchip830-linux-uclibcgnueabihf-strip build/ai-hud
+          file build/ai-hud
+          ls -lh build/ai-hud
+
+      # ---- Upload compiled binary ----
+      - name: Upload binary artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ai-hud-rv1106
+          path: build/ai-hud
+          retention-days: 30

@@ -3,17 +3,25 @@
 #
 # Cross-compile for Luckfox Pico Ultra (RV1106G3) using Buildroot toolchain
 #
-# Usage:
-#   export LUCKFOX_SDK_PATH=/path/to/luckfox-pico
-#   mkdir build && cd build
+# ---- Mode A: Lightweight build (recommended for app development) ----
+#   Uses standalone toolchain + RKMPI example repo for headers/libs.
+#
 #   cmake .. \
-#     -DCMAKE_C_COMPILER=${LUCKFOX_SDK_PATH}/tools/linux/toolchain/arm-rockchip830-linux-uclibcgnueabihf/bin/arm-rockchip830-linux-uclibcgnueabihf-gcc \
-#     -DSYSROOT=${LUCKFOX_SDK_PATH}/sysdrv/out/rootfs_uclibc_rv1106
-#   make -j$(nproc)
+#     -DCMAKE_TOOLCHAIN_FILE=../cmake/rv1106-toolchain.cmake \
+#     -DTOOLCHAIN_DIR=/path/to/arm-rockchip830-linux-uclibcgnueabihf \
+#     -DRKMPI_DIR=/path/to/luckfox_pico_rkmpi_example
+#
+# ---- Mode B: Full SDK build ----
+#   Uses the full Luckfox SDK sysroot (from sdk-build workflow).
+#
+#   export LUCKFOX_SDK_PATH=/path/to/luckfox-pico
+#   cmake .. \
+#     -DCMAKE_C_COMPILER=$LUCKFOX_SDK_PATH/tools/linux/toolchain/arm-rockchip830-linux-uclibcgnueabihf/bin/arm-rockchip830-linux-uclibcgnueabihf-gcc \
+#     -DSYSROOT=$LUCKFOX_SDK_PATH/sysdrv/out/rootfs_uclibc_rv1106
 #
 # Deploy:
-#   scp ai-hud root@172.32.0.93:/root/
-#   scp model/yolov5n_320.rknn root@172.32.0.93:/root/model/
+#   adb push ai-hud /root/
+#   adb push models/yolov5n_320.rknn /root/model/
 # ===========================================================================
 
 cmake_minimum_required(VERSION 3.10)
@@ -23,34 +31,51 @@ set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
 
 # --------------------------------------------------------------------------
-# SDK / Sysroot paths
-#
-# SYSROOT should be set to the Buildroot output sysroot that contains
-# the RKMPI headers and libraries. Adjust to match your SDK layout.
-# Typical path: ${LUCKFOX_SDK_PATH}/sysdrv/out/rootfs_uclibc_rv1106
+# Determine build mode: RKMPI_DIR (lightweight) vs SYSROOT (full SDK)
 # --------------------------------------------------------------------------
-if(NOT DEFINED SYSROOT)
-    if(DEFINED ENV{LUCKFOX_SDK_PATH})
-        set(SYSROOT "$ENV{LUCKFOX_SDK_PATH}/sysdrv/out/rootfs_uclibc_rv1106"
-            CACHE PATH "Sysroot for cross compilation")
-    else()
-        set(SYSROOT "/opt/luckfox-sysroot"
-            CACHE PATH "Sysroot for cross compilation (set -DSYSROOT=... or LUCKFOX_SDK_PATH env)")
+if(DEFINED RKMPI_DIR)
+    # ---- Mode A: Lightweight build using RKMPI example repo ----
+    message(STATUS "Build mode: Lightweight (RKMPI_DIR)")
+    message(STATUS "RKMPI_DIR = ${RKMPI_DIR}")
+
+    set(RKMPI_INC_DIR "${RKMPI_DIR}/include")
+    set(RKMPI_LIB_DIR "${RKMPI_DIR}/lib/uclibc")
+
+elseif(DEFINED ENV{RKMPI_DIR})
+    set(RKMPI_DIR "$ENV{RKMPI_DIR}")
+    message(STATUS "Build mode: Lightweight (RKMPI_DIR from env)")
+    message(STATUS "RKMPI_DIR = ${RKMPI_DIR}")
+
+    set(RKMPI_INC_DIR "${RKMPI_DIR}/include")
+    set(RKMPI_LIB_DIR "${RKMPI_DIR}/lib/uclibc")
+
+else()
+    # ---- Mode B: Full SDK sysroot ----
+    message(STATUS "Build mode: Full SDK (SYSROOT)")
+
+    if(NOT DEFINED SYSROOT)
+        if(DEFINED ENV{LUCKFOX_SDK_PATH})
+            set(SYSROOT "$ENV{LUCKFOX_SDK_PATH}/sysdrv/out/rootfs_uclibc_rv1106"
+                CACHE PATH "Sysroot for cross compilation")
+        else()
+            set(SYSROOT "/opt/luckfox-sysroot"
+                CACHE PATH "Sysroot for cross compilation")
+        endif()
     endif()
+
+    message(STATUS "SYSROOT = ${SYSROOT}")
+
+    set(RKMPI_INC_DIR "${SYSROOT}/usr/include" CACHE PATH "RKMPI header directory")
+    set(RKMPI_LIB_DIR "${SYSROOT}/usr/lib"     CACHE PATH "RKMPI library directory")
+
+    # Full SDK mode: override sysroot in compiler flags
+    set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} --sysroot=${SYSROOT}")
 endif()
-
-message(STATUS "SYSROOT = ${SYSROOT}")
-
-# Derive RKMPI include/lib paths from sysroot
-set(RKMPI_INC_DIR "${SYSROOT}/usr/include" CACHE PATH "RKMPI header directory")
-set(RKMPI_LIB_DIR "${SYSROOT}/usr/lib"     CACHE PATH "RKMPI library directory")
 
 # --------------------------------------------------------------------------
 # Compiler flags
 # --------------------------------------------------------------------------
 set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -Wall -Wextra -Wno-unused-parameter")
-set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} --sysroot=${SYSROOT}")
-
 set(CMAKE_C_FLAGS_DEBUG   "-O0 -g -DDEBUG")
 set(CMAKE_C_FLAGS_RELEASE "-O2 -DNDEBUG")
 
@@ -67,7 +92,7 @@ add_definitions(-DRV1106_RV1103)
 # Include directories
 # --------------------------------------------------------------------------
 include_directories(
-    ${CMAKE_SOURCE_DIR}/src       # Project headers (rknn_detect.h, postprocess.h)
+    ${CMAKE_SOURCE_DIR}/src       # Project headers (rknn_detect.h, postprocess.h, hud_ipc.h)
     ${RKMPI_INC_DIR}
     ${RKMPI_INC_DIR}/rockit
     ${RKMPI_INC_DIR}/rkaiq
@@ -76,15 +101,13 @@ include_directories(
 
 # --------------------------------------------------------------------------
 # Library directories
-#
-# On RV1106, the RKNN runtime (librknnmrt.so) is typically installed to
-# /oem/usr/lib on the board. The sysroot should mirror this layout, or
-# the library can be found under the standard /usr/lib in the sysroot.
 # --------------------------------------------------------------------------
-link_directories(
-    ${RKMPI_LIB_DIR}
-    ${SYSROOT}/oem/usr/lib         # RV1106 RKNN runtime (librknnmrt.so)
-)
+link_directories(${RKMPI_LIB_DIR})
+
+# For full SDK mode, also check the oem path
+if(DEFINED SYSROOT)
+    link_directories(${SYSROOT}/oem/usr/lib)
+endif()
 
 # --------------------------------------------------------------------------
 # Sources
@@ -102,7 +125,7 @@ add_executable(${PROJECT_NAME} ${SOURCES})
 
 target_link_libraries(${PROJECT_NAME}
     rockit          # RKMPI (VI, VPSS, VO, SYS)
-    rknnmrt         # RKNN NPU runtime (RV1106 mini runtime, NOT librknnrt.so)
+    rknnmrt         # RKNN NPU runtime (RV1106 mini runtime)
     pthread         # POSIX threads
     m               # Math library (expf, logf for sigmoid/postprocess)
 )
