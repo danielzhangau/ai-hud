@@ -343,7 +343,6 @@ int rknn_detect_run(rknn_detect_ctx_t *ctx,
 
     /* ---- Copy RGB data into input tensor memory ---- */
     rknn_tensor_mem *input_mem = (rknn_tensor_mem *)ctx->input_mem;
-    int model_w = ctx->model_width;
     int model_ch = ctx->model_channel;
     uint32_t stride = ctx->input_w_stride;
 
