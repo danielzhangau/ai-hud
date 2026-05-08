@@ -387,13 +387,16 @@ static int vo_init(void) {
     memset(&layer_attr, 0, sizeof(layer_attr));
 
     if (g_pip_mode) {
-        /* PiP: small camera window at bottom-right corner */
+        /* PiP: camera scaled to small window at bottom-right corner.
+         * stDispRect  = physical position/size on screen (VO hardware scales).
+         * stImageSize = virtual canvas matching VPSS output (480x480).
+         * VO hardware scales the 480x480 canvas down to 120x120 on screen. */
         layer_attr.stDispRect.s32X      = PIP_X;
         layer_attr.stDispRect.s32Y      = PIP_Y;
         layer_attr.stDispRect.u32Width  = PIP_SIZE;
         layer_attr.stDispRect.u32Height = PIP_SIZE;
-        layer_attr.stImageSize.u32Width  = PIP_SIZE;
-        layer_attr.stImageSize.u32Height = PIP_SIZE;
+        layer_attr.stImageSize.u32Width  = DISPLAY_WIDTH;
+        layer_attr.stImageSize.u32Height = DISPLAY_HEIGHT;
     } else {
         /* Full-screen camera preview */
         layer_attr.stDispRect.s32X      = 0;
@@ -425,10 +428,12 @@ static int vo_init(void) {
     /* ---- VO channel (fills the layer area) ---- */
     VO_CHN_ATTR_S chn_attr;
     memset(&chn_attr, 0, sizeof(chn_attr));
+    /* Channel rect fills the layer's virtual canvas (stImageSize).
+     * In both modes stImageSize = 480x480, so channel is always full-canvas. */
     chn_attr.stRect.s32X      = 0;
     chn_attr.stRect.s32Y      = 0;
-    chn_attr.stRect.u32Width  = g_pip_mode ? PIP_SIZE : VO_SCREEN_WIDTH;
-    chn_attr.stRect.u32Height = g_pip_mode ? PIP_SIZE : VO_SCREEN_HEIGHT;
+    chn_attr.stRect.u32Width  = DISPLAY_WIDTH;
+    chn_attr.stRect.u32Height = DISPLAY_HEIGHT;
     chn_attr.u32Priority      = 0;
     chn_attr.u32FgAlpha       = 255;
     chn_attr.u32BgAlpha       = 0;

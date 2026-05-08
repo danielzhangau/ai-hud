@@ -19,6 +19,9 @@ LOGFILE="/var/log/ai_hud.log"
 SPLASH_BIN="/root/splash_raw.bin"
 FB_DEV="/dev/fb0"
 
+# Ensure RKMPI libraries are in the search path (init.d may not inherit profile)
+export LD_LIBRARY_PATH="/oem/usr/lib:/oem/lib:${LD_LIBRARY_PATH}"
+
 log() {
     echo "$(date '+%Y-%m-%d %H:%M:%S') $1" >> "$LOGFILE"
 }
