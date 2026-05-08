@@ -390,21 +390,26 @@ int post_process(int8_t *input0, int8_t *input1, int8_t *input2,
 
     int total = 0;
 
+    /* Compute grid dimensions from model input size and strides */
+    int grid_h0 = model_in_h / strides[0];  /* stride 8  */
+    int grid_w0 = model_in_w / strides[0];
+    int grid_h1 = model_in_h / strides[1];  /* stride 16 */
+    int grid_w1 = model_in_w / strides[1];
+    int grid_h2 = model_in_h / strides[2];  /* stride 32 */
+    int grid_w2 = model_in_w / strides[2];
+
     /* Process each detection head */
-    /* Head 0: stride 8, grid 40x40 */
-    total += process_head(input0, anchors[0], GRID_H_0, GRID_W_0,
+    total += process_head(input0, anchors[0], grid_h0, grid_w0,
                           strides[0], qnt_zps[0], qnt_scales[0],
                           conf_threshold,
                           &raw_dets[total], MAX_RAW_DETECTIONS - total);
 
-    /* Head 1: stride 16, grid 20x20 */
-    total += process_head(input1, anchors[1], GRID_H_1, GRID_W_1,
+    total += process_head(input1, anchors[1], grid_h1, grid_w1,
                           strides[1], qnt_zps[1], qnt_scales[1],
                           conf_threshold,
                           &raw_dets[total], MAX_RAW_DETECTIONS - total);
 
-    /* Head 2: stride 32, grid 10x10 */
-    total += process_head(input2, anchors[2], GRID_H_2, GRID_W_2,
+    total += process_head(input2, anchors[2], grid_h2, grid_w2,
                           strides[2], qnt_zps[2], qnt_scales[2],
                           conf_threshold,
                           &raw_dets[total], MAX_RAW_DETECTIONS - total);

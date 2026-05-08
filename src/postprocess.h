@@ -37,21 +37,14 @@ extern "C" {
 #define BOX_THRESH          0.25f   /* Object confidence threshold       */
 #define PROP_BOX_SIZE       (5 + OBJ_CLASS_NUM)  /* 4 coords + 1 obj + classes */
 
-/* YOLOv5 model input dimensions */
-#define MODEL_INPUT_W       320
-#define MODEL_INPUT_H       320
-
 /* YOLOv5 has 3 detection heads with 3 anchors each */
 #define NUM_ANCHORS         3
 #define NUM_HEADS           3
 
-/* Grid dimensions for 320x320 input (stride 8, 16, 32) */
-#define GRID_H_0            40      /* 320 / 8  */
-#define GRID_W_0            40
-#define GRID_H_1            20      /* 320 / 16 */
-#define GRID_W_1            20
-#define GRID_H_2            10      /* 320 / 32 */
-#define GRID_W_2            10
+/* YOLOv5 strides -- grid sizes are computed at runtime from model dimensions */
+#define STRIDE_0            8
+#define STRIDE_1            16
+#define STRIDE_2            32
 
 /* --------------------------------------------------------------------------
  * Data structures

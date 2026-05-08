@@ -52,8 +52,13 @@
 #define DISPLAY_WIDTH       480
 #define DISPLAY_HEIGHT      480
 
-#define NPU_WIDTH           320
-#define NPU_HEIGHT          320
+/*
+ * NPU input size must match the RKNN model's expected input dimensions.
+ * COCO yolov5n.onnx from airockchip uses 640x640.
+ * Custom 320x320 models: change these to 320.
+ */
+#define NPU_WIDTH           640
+#define NPU_HEIGHT          640
 
 /* VO (Video Output) */
 #define VO_DEV_ID           0
@@ -264,7 +269,7 @@ static int vpss_init(void) {
         return ret;
     }
 
-    /* ---- Channel 1: 320x320 NV12 reserved for NPU ---- */
+    /* ---- Channel 1: NPU input (user-mode GetChnFrame) ---- */
     VPSS_CHN_ATTR_S chn1_attr;
     memset(&chn1_attr, 0, sizeof(chn1_attr));
     chn1_attr.enChnMode                    = VPSS_CHN_MODE_AUTO;
@@ -273,9 +278,9 @@ static int vpss_init(void) {
     chn1_attr.enPixelFormat                = RK_FMT_YUV420SP;  /* NV12 */
     chn1_attr.enCompressMode               = COMPRESS_MODE_NONE;
     chn1_attr.stFrameRate.s32SrcFrameRate  = -1;
-    chn1_attr.stFrameRate.s32DstFrameRate  = -1;
-    chn1_attr.u32Depth                     = 1;
-    chn1_attr.u32FrameBufCnt               = 2;
+    chn1_attr.stFrameRate.s32DstFrameRate  = TARGET_FPS;
+    chn1_attr.u32Depth                     = 2;
+    chn1_attr.u32FrameBufCnt               = 4;
 
     ret = RK_MPI_VPSS_SetChnAttr(VPSS_GRP_ID, VPSS_CHN_NPU, &chn1_attr);
     if (ret != 0) {
