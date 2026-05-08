@@ -128,7 +128,9 @@ set(SOURCES
 add_executable(${PROJECT_NAME} ${SOURCES})
 
 target_link_libraries(${PROJECT_NAME}
-    rockit          # RKMPI (VI, VPSS, VO, SYS)
+    rockit_full     # RKMPI full (VI, VPSS, VO, SYS -- rockit_tiny lacks VO)
+    rockchip_mpp    # Rockchip MPP codec/output backend
+    rga             # 2D graphics acceleration (used by rockit internally)
     rknnmrt         # RKNN NPU runtime (RV1106 mini runtime)
     pthread         # POSIX threads
     m               # Math library (expf, logf for sigmoid/postprocess)
