@@ -307,6 +307,21 @@ static void vpss_deinit(void) {
 static int vo_init(void) {
     int ret;
 
+    /*
+     * VO init order from official demo (simple_vi_get_frame_send_vo_rv1106):
+     *   1) BindLayer (GRAPHIC mode -- VIDEO mode triggers GPU compositor crash)
+     *   2) SetPubAttr -> Enable
+     *   3) SetLayerAttr -> SetLayerSpliceMode(RGA) -> EnableLayer
+     *   4) SetChnAttr -> EnableChn
+     */
+
+    /* ---- Bind layer to device FIRST (must precede everything else) ---- */
+    ret = RK_MPI_VO_BindLayer(VO_LAYER_ID, VO_DEV_ID, VO_LAYER_MODE_GRAPHIC);
+    if (ret != 0) {
+        printf("[ERROR] RK_MPI_VO_BindLayer failed: 0x%x\n", ret);
+        return ret;
+    }
+
     /* ---- VO device (display device) ---- */
     VO_PUB_ATTR_S pub_attr;
     memset(&pub_attr, 0, sizeof(pub_attr));
@@ -325,14 +340,7 @@ static int vo_init(void) {
         return ret;
     }
 
-    /* ---- Bind layer to device (must precede SetLayerAttr on RV1106) ---- */
-    ret = RK_MPI_VO_BindLayer(VO_LAYER_ID, VO_DEV_ID, VO_LAYER_MODE_VIDEO);
-    if (ret != 0) {
-        printf("[ERROR] RK_MPI_VO_BindLayer failed: 0x%x\n", ret);
-        return ret;
-    }
-
-    /* ---- VO layer ---- */
+    /* ---- VO layer (GRAPHIC mode + RGA splice, matching official demo) ---- */
     VO_VIDEO_LAYER_ATTR_S layer_attr;
     memset(&layer_attr, 0, sizeof(layer_attr));
     layer_attr.stDispRect.s32X      = 0;
@@ -341,7 +349,8 @@ static int vo_init(void) {
     layer_attr.stDispRect.u32Height = VO_SCREEN_HEIGHT;
     layer_attr.stImageSize.u32Width  = VO_SCREEN_WIDTH;
     layer_attr.stImageSize.u32Height = VO_SCREEN_HEIGHT;
-    layer_attr.enPixFormat           = RK_FMT_YUV420SP;  /* NV12 */
+    layer_attr.enPixFormat           = RK_FMT_RGB888;
+    layer_attr.enCompressMode        = COMPRESS_AFBC_16x16;
     layer_attr.u32DispFrmRt          = TARGET_FPS;
 
     ret = RK_MPI_VO_SetLayerAttr(VO_LAYER_ID, &layer_attr);
@@ -349,6 +358,9 @@ static int vo_init(void) {
         printf("[ERROR] RK_MPI_VO_SetLayerAttr failed: 0x%x\n", ret);
         return ret;
     }
+
+    /* Use RGA for compositing (RV1106 has no GPU -- avoids libgraphic_lsf.so assertion) */
+    RK_MPI_VO_SetLayerSpliceMode(VO_LAYER_ID, VO_SPLICE_MODE_RGA);
 
     ret = RK_MPI_VO_EnableLayer(VO_LAYER_ID);
     if (ret != 0) {
