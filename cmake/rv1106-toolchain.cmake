@@ -22,9 +22,11 @@ set(CMAKE_SYSTEM_PROCESSOR armv7l)
 # --------------------------------------------------------------------------
 # Resolve toolchain root directory
 #
-# Use CACHE so the value persists across CMake's internal try_compile calls
-# (toolchain files are re-invoked in scratch builds that lack -D variables).
+# CMAKE_TRY_COMPILE_PLATFORM_VARIABLES propagates TOOLCHAIN_DIR into
+# CMake's internal try_compile sub-builds (which have separate caches).
 # --------------------------------------------------------------------------
+list(APPEND CMAKE_TRY_COMPILE_PLATFORM_VARIABLES TOOLCHAIN_DIR)
+
 if(NOT DEFINED TOOLCHAIN_DIR)
     if(DEFINED ENV{TOOLCHAIN_DIR})
         set(TOOLCHAIN_DIR "$ENV{TOOLCHAIN_DIR}" CACHE PATH "Cross-compilation toolchain root")
@@ -37,7 +39,6 @@ if(NOT DEFINED TOOLCHAIN_DIR)
             "TOOLCHAIN_DIR / LUCKFOX_SDK_PATH environment variable.")
     endif()
 else()
-    # Ensure the -D value is also cached for try_compile
     set(TOOLCHAIN_DIR "${TOOLCHAIN_DIR}" CACHE PATH "Cross-compilation toolchain root")
 endif()
 
