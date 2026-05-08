@@ -101,8 +101,12 @@ include_directories(
 
 # --------------------------------------------------------------------------
 # Library directories
+#
+# -rpath-link tells the linker where to resolve transitive shared library
+# dependencies (e.g. librockit.so needs librockchip_mpp.so.1 and librga.so).
 # --------------------------------------------------------------------------
 link_directories(${RKMPI_LIB_DIR})
+set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -Wl,-rpath-link,${RKMPI_LIB_DIR}")
 
 # For full SDK mode, also check the oem path
 if(DEFINED SYSROOT)
