@@ -426,8 +426,8 @@ static void *inference_thread_func(void *arg) {
 
                 /* Write detection results to IPC file for HUD display */
                 if (local_result.count > 0) {
-                    int cls_ids[DETECT_MAX_COUNT];
-                    float confs[DETECT_MAX_COUNT];
+                    int cls_ids[OBJ_NUMB_MAX_SIZE];
+                    float confs[OBJ_NUMB_MAX_SIZE];
                     for (int i = 0; i < local_result.count; i++) {
                         cls_ids[i] = local_result.results[i].class_id;
                         confs[i] = local_result.results[i].prop;

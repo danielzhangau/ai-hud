@@ -93,9 +93,9 @@ static int vi_init(void) {
     memset(&dev_attr, 0, sizeof(dev_attr));
     dev_attr.enIntfMode     = VI_MODE_MIPI;
     dev_attr.enWorkMode     = VI_WORK_MODE_1Multiplex;
-    dev_attr.enInputDataType = VI_DATA_TYPE_RAW10;
-    dev_attr.stSize.u32Width  = VI_WIDTH;
-    dev_attr.stSize.u32Height = VI_HEIGHT;
+    dev_attr.enInputDataType = VI_DATA_TYPE_YUV;
+    dev_attr.stMaxSize.u32Width  = VI_WIDTH;
+    dev_attr.stMaxSize.u32Height = VI_HEIGHT;
 
     ret = RK_MPI_VI_SetDevAttr(VI_PIPE_ID, &dev_attr);
     if (ret != 0) {
@@ -279,9 +279,9 @@ static int vo_init(void) {
         return ret;
     }
 
-    ret = RK_MPI_VO_EnableVideoLayer(VO_LAYER_ID);
+    ret = RK_MPI_VO_EnableLayer(VO_LAYER_ID);
     if (ret != 0) {
-        printf("[ERROR] RK_MPI_VO_EnableVideoLayer failed: 0x%x\n", ret);
+        printf("[ERROR] RK_MPI_VO_EnableLayer failed: 0x%x\n", ret);
         return ret;
     }
 
@@ -316,7 +316,7 @@ static int vo_init(void) {
 
 static void vo_deinit(void) {
     RK_MPI_VO_DisableChn(VO_LAYER_ID, VO_CHN_ID);
-    RK_MPI_VO_DisableVideoLayer(VO_LAYER_ID);
+    RK_MPI_VO_DisableLayer(VO_LAYER_ID);
     RK_MPI_VO_Disable(VO_DEV_ID);
     printf("[INFO] VO deinitialized\n");
 }
