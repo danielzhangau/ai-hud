@@ -216,9 +216,12 @@ static int nms(raw_detection_t *dets, int count, float nms_threshold,
      * 1. Sort by score (already sorted before calling)
      * 2. For each detection, suppress all later detections of the same
      *    class with IoU > threshold
+     *
+     * Static buffer avoids per-frame calloc/free.
+     * memset replaces calloc's zero-initialization.
      */
-    int *suppressed = (int *)calloc(count, sizeof(int));
-    if (!suppressed) return 0;
+    static int suppressed[MAX_RAW_DETECTIONS];
+    memset(suppressed, 0, count * sizeof(int));
 
     int keep_count = 0;
 
@@ -244,7 +247,6 @@ static int nms(raw_detection_t *dets, int count, float nms_threshold,
         }
     }
 
-    free(suppressed);
     return keep_count;
 }
 
@@ -313,22 +315,42 @@ static int process_head(int8_t *input, const int *anchor, int grid_h, int grid_w
                 if (obj_qnt < qnt_obj_thresh)
                     continue;
 
+                /*
+                 * Find best class in INT8 quantized space first.
+                 * Since dequant is monotonic (scale > 0) and sigmoid is monotonic,
+                 * the largest int8_t value maps to the highest class probability.
+                 * This avoids OBJ_CLASS_NUM sigmoid calls (each using expf).
+                 */
+                int best_cls = 0;
+                int8_t best_cls_qnt = input[offset + 5];
+                for (int c = 1; c < OBJ_CLASS_NUM; c++) {
+                    int8_t cls_qnt = input[offset + 5 + c];
+                    if (cls_qnt > best_cls_qnt) {
+                        best_cls_qnt = cls_qnt;
+                        best_cls = c;
+                    }
+                }
+
+                /*
+                 * Combined quantized-space threshold check.
+                 * Both obj_qnt and best_cls_qnt must be above the objectness
+                 * threshold to have any chance of passing after sigmoid multiply.
+                 * This is conservative: conf_threshold for each factor individually
+                 * is a necessary (not sufficient) condition for
+                 * sigmoid(obj) * sigmoid(cls) >= conf_threshold.
+                 * Rejects the vast majority of candidates with zero sigmoid calls.
+                 */
+                if (best_cls_qnt < qnt_obj_thresh)
+                    continue;
+
                 /* Dequantize objectness and apply sigmoid */
                 float obj_conf = sigmoid(deqnt_affine_to_f32(obj_qnt, zp, scale));
                 if (obj_conf < conf_threshold)
                     continue;
 
-                /* Find best class */
-                int best_cls = 0;
-                float best_cls_score = -1.0f;
-                for (int c = 0; c < OBJ_CLASS_NUM; c++) {
-                    float cls_val = sigmoid(
-                        deqnt_affine_to_f32(input[offset + 5 + c], zp, scale));
-                    if (cls_val > best_cls_score) {
-                        best_cls_score = cls_val;
-                        best_cls = c;
-                    }
-                }
+                /* Only sigmoid the winning class (1 expf instead of OBJ_CLASS_NUM) */
+                float best_cls_score = sigmoid(
+                    deqnt_affine_to_f32(best_cls_qnt, zp, scale));
 
                 float final_score = obj_conf * best_cls_score;
                 if (final_score < conf_threshold)
@@ -380,13 +402,12 @@ int post_process(int8_t *input0, int8_t *input1, int8_t *input2,
 
     memset(group, 0, sizeof(detect_result_group_t));
 
-    /* Allocate raw detection buffer */
-    raw_detection_t *raw_dets = (raw_detection_t *)malloc(
-        MAX_RAW_DETECTIONS * sizeof(raw_detection_t));
-    if (!raw_dets) {
-        printf("[ERROR] postprocess: failed to allocate detection buffer\n");
-        return -1;
-    }
+    /*
+     * Static buffers -- avoid malloc/free overhead every frame.
+     * Safe: post_process() is only called from a single inference thread.
+     */
+    static raw_detection_t raw_dets[MAX_RAW_DETECTIONS];
+    static int keep_indices[MAX_RAW_DETECTIONS];
 
     int total = 0;
 
@@ -414,21 +435,13 @@ int post_process(int8_t *input0, int8_t *input1, int8_t *input2,
                           conf_threshold,
                           &raw_dets[total], MAX_RAW_DETECTIONS - total);
 
-    if (total == 0) {
-        free(raw_dets);
+    if (total == 0)
         return 0;
-    }
 
     /* Sort by score (descending) */
     quicksort(raw_dets, 0, total - 1);
 
     /* Apply NMS */
-    int *keep_indices = (int *)malloc(total * sizeof(int));
-    if (!keep_indices) {
-        free(raw_dets);
-        return -1;
-    }
-
     int keep_count = nms(raw_dets, total, nms_threshold,
                          keep_indices, OBJ_NUMB_MAX_SIZE);
 
@@ -455,9 +468,6 @@ int post_process(int8_t *input0, int8_t *input1, int8_t *input2,
         strncpy(r->name, name, OBJ_NAME_MAX_SIZE - 1);
         r->name[OBJ_NAME_MAX_SIZE - 1] = '\0';
     }
-
-    free(keep_indices);
-    free(raw_dets);
 
     return 0;
 }

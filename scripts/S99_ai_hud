@@ -1,9 +1,20 @@
 #!/bin/sh
 # AI-HUD auto-start script for Buildroot init.d
+#
+# Boot sequence:
+#   1. Kill rkipc / demo processes that occupy camera/display
+#   2. Show splash screen for 3 seconds
+#   3. Start ai-hud (C binary: camera -> NPU -> IPC)
+#   4. Start hud_live.py (Python: GPS + IPC -> framebuffer display)
 
-DAEMON="/root/hud_live.py"
-DAEMON_ARGS="/dev/ttyS4 9600"
-PIDFILE="/var/run/ai_hud.pid"
+AI_HUD="/root/ai-hud"
+AI_HUD_MODEL="/root/model/yolov5n_rv1106.rknn"
+AI_HUD_PIDFILE="/var/run/ai_hud_c.pid"
+
+HUD_PY="/root/hud_live.py"
+HUD_PY_ARGS="/dev/ttyS4 9600"
+HUD_PY_PIDFILE="/var/run/ai_hud_py.pid"
+
 LOGFILE="/var/log/ai_hud.log"
 SPLASH_BIN="/root/splash_raw.bin"
 FB_DEV="/dev/fb0"
@@ -13,7 +24,7 @@ log() {
 }
 
 kill_display_blockers() {
-    # Stop processes that may occupy the display
+    # Stop processes that may occupy the camera or display
     for proc in rkipc simple_vi_get_frame_send_vo_rv1106; do
         if pidof "$proc" > /dev/null 2>&1; then
             log "Stopping $proc ..."
@@ -49,29 +60,55 @@ start() {
     show_splash
     sleep 3
 
-    # Launch hud_live.py (double-fork to fully detach from caller session)
-    if [ -f "$DAEMON" ]; then
-        log "Starting $DAEMON $DAEMON_ARGS"
-        ( nohup python3 "$DAEMON" $DAEMON_ARGS >> "$LOGFILE" 2>&1 & echo $! > "$PIDFILE" )
-        log "Started with PID $(cat $PIDFILE 2>/dev/null)"
+    # Launch ai-hud C binary (camera + NPU inference pipeline)
+    if [ -x "$AI_HUD" ] && [ -f "$AI_HUD_MODEL" ]; then
+        log "Starting $AI_HUD --model $AI_HUD_MODEL"
+        ( nohup "$AI_HUD" --model "$AI_HUD_MODEL" >> "$LOGFILE" 2>&1 & echo $! > "$AI_HUD_PIDFILE" )
+        sleep 2  # Wait for camera pipeline to initialize
+        log "ai-hud started with PID $(cat $AI_HUD_PIDFILE 2>/dev/null)"
+    elif [ -x "$AI_HUD" ]; then
+        # No model file: run display-only mode
+        log "Starting $AI_HUD (display-only, no model)"
+        ( nohup "$AI_HUD" >> "$LOGFILE" 2>&1 & echo $! > "$AI_HUD_PIDFILE" )
+        sleep 2
+        log "ai-hud started with PID $(cat $AI_HUD_PIDFILE 2>/dev/null)"
     else
-        log "ERROR: $DAEMON not found, cannot start"
+        log "WARNING: $AI_HUD not found, skipping camera pipeline"
+    fi
+
+    # Launch hud_live.py (GPS HUD + NPU result display)
+    if [ -f "$HUD_PY" ]; then
+        log "Starting $HUD_PY $HUD_PY_ARGS"
+        ( nohup python3 "$HUD_PY" $HUD_PY_ARGS >> "$LOGFILE" 2>&1 & echo $! > "$HUD_PY_PIDFILE" )
+        log "hud_live.py started with PID $(cat $HUD_PY_PIDFILE 2>/dev/null)"
+    else
+        log "ERROR: $HUD_PY not found, cannot start HUD display"
     fi
 }
 
 stop() {
     log "===== STOP ====="
 
-    if [ -f "$PIDFILE" ]; then
-        kill "$(cat $PIDFILE)" 2>/dev/null
+    # Stop hud_live.py first (it writes to framebuffer)
+    if [ -f "$HUD_PY_PIDFILE" ]; then
+        kill "$(cat $HUD_PY_PIDFILE)" 2>/dev/null
         sleep 1
-        kill -9 "$(cat $PIDFILE)" 2>/dev/null
+        kill -9 "$(cat $HUD_PY_PIDFILE)" 2>/dev/null
+        rm -f "$HUD_PY_PIDFILE"
         log "Stopped hud_live.py"
-        rm -f "$PIDFILE"
     else
-        # Fallback: kill by process name
         pkill -f "hud_live.py" 2>/dev/null
-        log "Killed hud_live.py by name"
+    fi
+
+    # Stop ai-hud (camera + NPU pipeline)
+    if [ -f "$AI_HUD_PIDFILE" ]; then
+        kill "$(cat $AI_HUD_PIDFILE)" 2>/dev/null
+        sleep 2  # Give RKMPI time to clean up
+        kill -9 "$(cat $AI_HUD_PIDFILE)" 2>/dev/null
+        rm -f "$AI_HUD_PIDFILE"
+        log "Stopped ai-hud"
+    else
+        pkill -f "ai-hud" 2>/dev/null
     fi
 
     # Clear the framebuffer to black
