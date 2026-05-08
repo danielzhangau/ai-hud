@@ -15,10 +15,18 @@ __pycache__/
 .vscode/
 .idea/
 
-# Model binaries (不入库)
+# Model binaries
 *.rknn
 *.onnx
 *.pt
+
+# Training data (too large for git)
+training/au_speed_dataset/
+training/au_speed_dataset.tar.gz
+training/downloads/
+
+# Temporary files
+/tmp/
 
 # Empty dirs
 sysroot/
