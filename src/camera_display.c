@@ -4,9 +4,9 @@
  * Camera + Display pipeline for Luckfox Pico Ultra (RV1106G3)
  * Pipeline: VI (SC3336 MIPI CSI) -> VPSS -> VO (DPI LCD 480x480)
  *
- * VPSS single-channel configuration (RV1106 limitation: one output per group):
- *   Channel 0: 480x480 NV12 -> VO display (bind) + NPU inference (GetChnFrame)
- *   Inference thread resizes 480x480 -> model input size in software.
+ * VI dual-channel configuration (official Luckfox pattern for RV1106):
+ *   VI CHN0 (mainpath): 2304x1296 -> VPSS -> 480x480 -> VO (display, bind)
+ *   VI CHN1 (selfpath): 480x480 -> NPU inference (user-mode GetChnFrame)
  *
  * Usage:
  *   ./ai-hud                              Display-only mode
@@ -40,22 +40,32 @@
 
 /* VI (Video Input) */
 #define VI_PIPE_ID          0
-#define VI_CHN_ID           0
+#define VI_CHN_ID           0       /* Channel 0: mainpath -> VPSS -> VO  */
+#define VI_CHN_NPU          1       /* Channel 1: selfpath -> NPU (user-mode) */
 #define VI_WIDTH            2304    /* SC3336 native width  */
 #define VI_HEIGHT           1296    /* SC3336 native height */
 
+/*
+ * VI CHN1 (NPU) output resolution.
+ * The ISP selfpath crops from center and resizes to this square.
+ * Using 480x480 (same as display) with software resize to model input.
+ */
+#define VI_NPU_WIDTH        480
+#define VI_NPU_HEIGHT       480
+
 /* VPSS (Video Processing Sub-System) */
 #define VPSS_GRP_ID         0
-#define VPSS_CHN_DISPLAY    0       /* Channel 0: display + NPU shared */
+#define VPSS_CHN_DISPLAY    0       /* Channel 0: display output only   */
 
 #define DISPLAY_WIDTH       480
 #define DISPLAY_HEIGHT      480
 
 /*
- * RV1106 VPSS limitation: only one active output channel per group.
- * CHN1 always returns NOBUF (0xa006800e). Workaround: use CHN0 for
- * both display (via bind to VO) and NPU (via GetChnFrame with u32Depth>=1).
- * The inference thread resizes 480x480 -> model input size in software.
+ * RV1106 VPSS limitation: bind mode GetChnFrame only yields initial
+ * buffer frames (confirmed: 1 frame then NOBUF 0xa006800e).
+ * Solution: VI dual-channel (official Luckfox pattern).
+ *   CHN0 (mainpath) -> VPSS -> VO (display, bind)
+ *   CHN1 (selfpath) -> GetChnFrame -> NPU inference (user-mode)
  */
 
 /* VO (Video Output) */
@@ -185,36 +195,65 @@ static int vi_init(void) {
         }
     }
 
-    /* ---- Configure VI channel ---- */
+    /* ---- Configure VI channel 0 (mainpath -> VPSS -> VO) ---- */
     VI_CHN_ATTR_S chn_attr;
     memset(&chn_attr, 0, sizeof(chn_attr));
     chn_attr.stSize.u32Width       = VI_WIDTH;
     chn_attr.stSize.u32Height      = VI_HEIGHT;
     chn_attr.enPixelFormat         = RK_FMT_YUV420SP;   /* NV12 */
-    chn_attr.u32Depth              = 2;                  /* User get-list depth */
+    chn_attr.u32Depth              = 0;                  /* Bound to VPSS, no user GetChnFrame */
     chn_attr.enCompressMode        = COMPRESS_MODE_NONE;
-    chn_attr.stIspOpt.u32BufCount  = 2;
+    chn_attr.stIspOpt.u32BufCount  = 4;                  /* Increased for dual-channel */
     chn_attr.stIspOpt.enMemoryType = VI_V4L2_MEMORY_TYPE_DMABUF;
 
     ret = RK_MPI_VI_SetChnAttr(pipe_id, VI_CHN_ID, &chn_attr);
     if (ret != 0) {
-        printf("[ERROR] RK_MPI_VI_SetChnAttr failed: 0x%x\n", ret);
+        printf("[ERROR] RK_MPI_VI_SetChnAttr(CHN0) failed: 0x%x\n", ret);
         return ret;
     }
 
     ret = RK_MPI_VI_EnableChn(pipe_id, VI_CHN_ID);
     if (ret != 0) {
-        printf("[ERROR] RK_MPI_VI_EnableChn failed: 0x%x\n", ret);
+        printf("[ERROR] RK_MPI_VI_EnableChn(CHN0) failed: 0x%x\n", ret);
         return ret;
     }
 
-    printf("[INFO] VI initialized: pipe=%d, chn=%d, %dx%d NV12\n",
-           pipe_id, VI_CHN_ID, VI_WIDTH, VI_HEIGHT);
+    printf("[INFO] VI CHN0 (mainpath): pipe=%d, %dx%d NV12\n",
+           pipe_id, VI_WIDTH, VI_HEIGHT);
+
+    /* ---- Configure VI channel 1 (selfpath -> NPU inference) ---- */
+    if (g_model_path) {
+        VI_CHN_ATTR_S npu_chn_attr;
+        memset(&npu_chn_attr, 0, sizeof(npu_chn_attr));
+        npu_chn_attr.stSize.u32Width       = VI_NPU_WIDTH;
+        npu_chn_attr.stSize.u32Height      = VI_NPU_HEIGHT;
+        npu_chn_attr.enPixelFormat         = RK_FMT_YUV420SP;   /* NV12 */
+        npu_chn_attr.u32Depth              = 2;                  /* User-mode GetChnFrame */
+        npu_chn_attr.enCompressMode        = COMPRESS_MODE_NONE;
+        npu_chn_attr.stIspOpt.u32BufCount  = 4;
+        npu_chn_attr.stIspOpt.enMemoryType = VI_V4L2_MEMORY_TYPE_DMABUF;
+
+        ret = RK_MPI_VI_SetChnAttr(pipe_id, VI_CHN_NPU, &npu_chn_attr);
+        if (ret != 0) {
+            printf("[WARN] RK_MPI_VI_SetChnAttr(CHN1) failed: 0x%x\n", ret);
+            /* Non-fatal: NPU will be disabled */
+        } else {
+            ret = RK_MPI_VI_EnableChn(pipe_id, VI_CHN_NPU);
+            if (ret != 0) {
+                printf("[WARN] RK_MPI_VI_EnableChn(CHN1) failed: 0x%x\n", ret);
+            } else {
+                printf("[INFO] VI CHN1 (selfpath): pipe=%d, %dx%d NV12 (NPU)\n",
+                       pipe_id, VI_NPU_WIDTH, VI_NPU_HEIGHT);
+            }
+        }
+    }
+
     return 0;
 }
 
 static void vi_deinit(void) {
-    RK_MPI_VI_DisableChn(VI_PIPE_ID, VI_CHN_ID);
+    RK_MPI_VI_DisableChn(VI_PIPE_ID, VI_CHN_NPU);   /* CHN1: NPU (safe even if not enabled) */
+    RK_MPI_VI_DisableChn(VI_PIPE_ID, VI_CHN_ID);     /* CHN0: mainpath */
     RK_MPI_VI_DisableDev(VI_PIPE_ID);
     printf("[INFO] VI deinitialized\n");
 }
@@ -252,8 +291,8 @@ static int vpss_init(void) {
     chn0_attr.enCompressMode               = COMPRESS_MODE_NONE;
     chn0_attr.stFrameRate.s32SrcFrameRate  = -1;
     chn0_attr.stFrameRate.s32DstFrameRate  = -1;
-    chn0_attr.u32Depth                     = 2;  /* allow user-mode GetChnFrame */
-    chn0_attr.u32FrameBufCnt               = 4;
+    chn0_attr.u32Depth                     = 0;  /* Bound to VO, no user GetChnFrame */
+    chn0_attr.u32FrameBufCnt               = 3;
 
     ret = RK_MPI_VPSS_SetChnAttr(VPSS_GRP_ID, VPSS_CHN_DISPLAY, &chn0_attr);
     if (ret != 0) {
@@ -495,7 +534,7 @@ static void print_usage(const char *prog) {
     printf("  -h, --help          Show this help\n");
     printf("\n");
     printf("Without --model, runs display-only (VI -> VPSS -> VO).\n");
-    printf("With --model, starts NPU inference on VPSS CHN0.\n");
+    printf("With --model, starts NPU inference on VI CHN1 (selfpath).\n");
 }
 
 int main(int argc, char *argv[]) {
@@ -582,14 +621,14 @@ int main(int argc, char *argv[]) {
             printf("[WARN] RKNN init failed, continuing without NPU\n");
         } else {
             ret = rknn_detect_start_thread(&g_detector,
-                                           VPSS_GRP_ID, VPSS_CHN_DISPLAY);
+                                           RKNN_SRC_VI, VI_PIPE_ID, VI_CHN_NPU);
             if (ret != 0) {
                 printf("[WARN] RKNN thread start failed\n");
                 rknn_detect_release(&g_detector);
             } else {
                 g_npu_enabled = 1;
-                printf("[INFO] NPU inference thread started on VPSS CHN%d\n",
-                       VPSS_CHN_DISPLAY);
+                printf("[INFO] NPU inference thread started on VI CHN%d\n",
+                       VI_CHN_NPU);
             }
         }
     }
@@ -612,9 +651,9 @@ int main(int argc, char *argv[]) {
      *   VI captures -> VPSS scales -> VO displays
      * No manual frame get/release is needed for the display path.
      *
-     * When --model is specified, the NPU inference thread concurrently
-     * calls GetChnFrame() on VPSS CHN0 (u32Depth>=1 enables this alongside
-     * the VO bind). Frames are resized in software to model input size.
+     * When --model is specified, the NPU inference thread reads from
+     * VI CHN1 (selfpath) via GetChnFrame(), independent of the display
+     * pipeline. Frames are resized in software to model input size.
      */
     while (g_running) {
         usleep(100 * 1000);  /* 100ms idle poll */
@@ -624,7 +663,7 @@ int main(int argc, char *argv[]) {
 
     /* ---- Step 7: Cleanup (reverse order) ---- */
 
-    /* Stop NPU inference thread first (it reads from VPSS CHN0) */
+    /* Stop NPU inference thread first (it reads from VI CHN1) */
     if (g_npu_enabled) {
         rknn_detect_release(&g_detector);
         g_npu_enabled = 0;

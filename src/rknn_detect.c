@@ -35,7 +35,8 @@
 /* RKNN C API header */
 #include "rknn_api.h"
 
-/* RKMPI headers for VPSS frame grabbing in the inference thread */
+/* RKMPI headers for frame grabbing in the inference thread */
+#include "rk_mpi_vi.h"
 #include "rk_mpi_vpss.h"
 #include "rk_mpi_mb.h"
 
@@ -123,8 +124,9 @@ static void resize_rgb_nearest(const uint8_t *src, int src_w, int src_h,
 
 typedef struct _infer_thread_arg_t {
     rknn_detect_ctx_t *ctx;
-    int vpss_grp;
-    int vpss_chn;
+    int src_type;   /* RKNN_SRC_VI or RKNN_SRC_VPSS */
+    int dev_id;     /* VI pipe or VPSS group */
+    int chn_id;     /* VI/VPSS channel */
 } infer_thread_arg_t;
 
 /* --------------------------------------------------------------------------
@@ -420,36 +422,43 @@ int rknn_detect_run(rknn_detect_ctx_t *ctx,
 static void *inference_thread_func(void *arg) {
     infer_thread_arg_t *targ = (infer_thread_arg_t *)arg;
     rknn_detect_ctx_t *ctx = targ->ctx;
-    int vpss_grp = targ->vpss_grp;
-    int vpss_chn = targ->vpss_chn;
+    int src_type = targ->src_type;
+    int dev_id   = targ->dev_id;
+    int chn_id   = targ->chn_id;
     free(targ);  /* Allocated by rknn_detect_start_thread */
 
-    printf("[INFO] RKNN inference thread started (VPSS grp=%d, chn=%d)\n",
-           vpss_grp, vpss_chn);
+    const char *src_name = (src_type == RKNN_SRC_VI) ? "VI" : "VPSS";
+    printf("[INFO] RKNN inference thread started (%s dev=%d, chn=%d)\n",
+           src_name, dev_id, chn_id);
 
     int consecutive_errors = 0;
     detect_result_group_t local_result;
 
     while (!ctx->thread_should_stop) {
         /*
-         * Grab a frame from VPSS (NV12).
+         * Grab a frame (NV12) from the configured source.
          *
-         * RK_MPI_VPSS_GetChnFrame() blocks up to the timeout waiting for
-         * a new frame. The frame buffer is a hardware DMA buffer managed
-         * by RKMPI. On RV1106, we use CHN0 (shared with display bind).
+         * VI mode:   RK_MPI_VI_GetChnFrame (dedicated ISP selfpath channel)
+         * VPSS mode: RK_MPI_VPSS_GetChnFrame (fallback, limited by bind)
          */
         VIDEO_FRAME_INFO_S frame_info;
         memset(&frame_info, 0, sizeof(frame_info));
 
-        int ret = RK_MPI_VPSS_GetChnFrame(vpss_grp, vpss_chn,
+        int ret;
+        if (src_type == RKNN_SRC_VI) {
+            ret = RK_MPI_VI_GetChnFrame(dev_id, chn_id,
+                                         &frame_info, RKNN_FRAME_TIMEOUT_MS);
+        } else {
+            ret = RK_MPI_VPSS_GetChnFrame(dev_id, chn_id,
                                            &frame_info, RKNN_FRAME_TIMEOUT_MS);
+        }
         if (ret != 0) {
             if (!ctx->thread_should_stop) {
                 consecutive_errors++;
                 if (consecutive_errors <= RKNN_MAX_CONSECUTIVE_ERRORS ||
                     (consecutive_errors % 100) == 0) {
-                    printf("[WARN] VPSS GetChnFrame failed: 0x%x (errors=%d)\n",
-                           ret, consecutive_errors);
+                    printf("[WARN] %s GetChnFrame failed: 0x%x (errors=%d)\n",
+                           src_name, ret, consecutive_errors);
                 }
             }
             continue;
@@ -492,8 +501,12 @@ static void *inference_thread_func(void *arg) {
             }
         }
 
-        /* Release the frame back to VPSS */
-        RK_MPI_VPSS_ReleaseChnFrame(vpss_grp, vpss_chn, &frame_info);
+        /* Release the frame back to the source module */
+        if (src_type == RKNN_SRC_VI) {
+            RK_MPI_VI_ReleaseChnFrame(dev_id, chn_id, &frame_info);
+        } else {
+            RK_MPI_VPSS_ReleaseChnFrame(dev_id, chn_id, &frame_info);
+        }
     }
 
     ctx->thread_running = 0;
@@ -507,7 +520,7 @@ static void *inference_thread_func(void *arg) {
  * -------------------------------------------------------------------------- */
 
 int rknn_detect_start_thread(rknn_detect_ctx_t *ctx,
-                             int vpss_grp, int vpss_chn) {
+                             int src_type, int dev_id, int chn_id) {
     if (!ctx || !ctx->initialized)
         return -1;
 
@@ -522,9 +535,10 @@ int rknn_detect_start_thread(rknn_detect_ctx_t *ctx,
         printf("[ERROR] Failed to allocate thread argument\n");
         return -1;
     }
-    targ->ctx = ctx;
-    targ->vpss_grp = vpss_grp;
-    targ->vpss_chn = vpss_chn;
+    targ->ctx      = ctx;
+    targ->src_type = src_type;
+    targ->dev_id   = dev_id;
+    targ->chn_id   = chn_id;
 
     ctx->thread_should_stop = 0;
     ctx->thread_running = 1;

@@ -37,6 +37,10 @@ extern "C" {
 /* Inference thread frame grab timeout (milliseconds) */
 #define RKNN_FRAME_TIMEOUT_MS   200
 
+/* Frame source types for inference thread */
+#define RKNN_SRC_VPSS  0
+#define RKNN_SRC_VI    1
+
 /* Maximum number of consecutive inference errors before logging a warning */
 #define RKNN_MAX_CONSECUTIVE_ERRORS 10
 
@@ -147,13 +151,14 @@ int rknn_detect_run(rknn_detect_ctx_t *ctx,
  * to retrieve the most recent results.
  *
  * @ctx:         Initialized detector context
- * @vpss_grp:    VPSS group ID
- * @vpss_chn:    VPSS channel ID (CHN0 on RV1106, shared with display)
+ * @src_type:    Frame source: RKNN_SRC_VI or RKNN_SRC_VPSS
+ * @dev_id:      VI pipe ID or VPSS group ID
+ * @chn_id:      VI/VPSS channel ID
  *
  * Returns 0 on success, negative on error.
  */
 int rknn_detect_start_thread(rknn_detect_ctx_t *ctx,
-                             int vpss_grp, int vpss_chn);
+                             int src_type, int dev_id, int chn_id);
 
 /*
  * rknn_detect_stop_thread - Stop the background inference thread.
