@@ -325,6 +325,13 @@ static int vo_init(void) {
         return ret;
     }
 
+    /* ---- Bind layer to device (must precede SetLayerAttr on RV1106) ---- */
+    ret = RK_MPI_VO_BindLayer(VO_LAYER_ID, VO_DEV_ID, VO_LAYER_MODE_VIDEO);
+    if (ret != 0) {
+        printf("[ERROR] RK_MPI_VO_BindLayer failed: 0x%x\n", ret);
+        return ret;
+    }
+
     /* ---- VO layer ---- */
     VO_VIDEO_LAYER_ATTR_S layer_attr;
     memset(&layer_attr, 0, sizeof(layer_attr));
@@ -381,6 +388,7 @@ static int vo_init(void) {
 static void vo_deinit(void) {
     RK_MPI_VO_DisableChn(VO_LAYER_ID, VO_CHN_ID);
     RK_MPI_VO_DisableLayer(VO_LAYER_ID);
+    RK_MPI_VO_UnBindLayer(VO_LAYER_ID, VO_DEV_ID);
     RK_MPI_VO_Disable(VO_DEV_ID);
     printf("[INFO] VO deinitialized\n");
 }
