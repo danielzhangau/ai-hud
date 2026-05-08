@@ -107,6 +107,84 @@ def draw_limit_sign(draw, cx, cy, r, text):
     center_text(draw, cx, cy - 2, text, fnt, (20, 20, 25))
 
 
+PIP_SIZE = 120
+PIP_MARGIN = 10
+PIP_X = W - PIP_MARGIN - PIP_SIZE   # 350
+PIP_Y = H - PIP_MARGIN - PIP_SIZE   # 350
+PIP_BORDER_COL = (80, 85, 100)
+
+
+def draw_pip_preview(img, draw):
+    """Draw a stylized camera preview placeholder in the PiP area.
+
+    Shows a simple road perspective with lane lines to clearly
+    communicate 'live camera feed' in the mockup.
+    """
+    px, py = PIP_X, PIP_Y
+    ps = PIP_SIZE
+
+    # Dark background (slightly lighter than HUD bg for contrast)
+    draw.rectangle([px, py, px + ps - 1, py + ps - 1], fill=(18, 22, 30))
+
+    # Simple road perspective: vanishing point at top-center of PiP
+    vx = px + ps // 2       # vanishing point x
+    vy = py + 25             # vanishing point y (near top)
+    bottom = py + ps - 1
+
+    # Road surface (dark gray trapezoid)
+    road_l = px + 10
+    road_r = px + ps - 10
+    draw.polygon([(vx - 2, vy), (vx + 2, vy),
+                  (road_r, bottom), (road_l, bottom)],
+                 fill=(40, 44, 52))
+
+    # Center dashed line
+    for i in range(4):
+        y1 = vy + 30 + i * 22
+        y2 = y1 + 12
+        if y2 > bottom:
+            break
+        # Line gets wider toward bottom (perspective)
+        frac = (y1 - vy) / (bottom - vy)
+        hw = max(1, int(frac * 2))
+        draw.rectangle([vx - hw, y1, vx + hw, y2], fill=(180, 185, 195))
+
+    # Left lane line
+    for i in range(3):
+        frac1 = 0.3 + i * 0.25
+        frac2 = frac1 + 0.12
+        y1 = int(vy + frac1 * (bottom - vy))
+        y2 = int(vy + frac2 * (bottom - vy))
+        x1 = int(vx - frac1 * (vx - road_l))
+        x2 = int(vx - frac2 * (vx - road_l))
+        draw.line([(x1, y1), (x2, y2)], fill=(140, 145, 155), width=1)
+
+    # Right lane line
+    for i in range(3):
+        frac1 = 0.3 + i * 0.25
+        frac2 = frac1 + 0.12
+        y1 = int(vy + frac1 * (bottom - vy))
+        y2 = int(vy + frac2 * (bottom - vy))
+        x1 = int(vx + frac1 * (road_r - vx))
+        x2 = int(vx + frac2 * (road_r - vx))
+        draw.line([(x1, y1), (x2, y2)], fill=(140, 145, 155), width=1)
+
+    # Sky gradient (top portion)
+    for y in range(py, vy):
+        frac = (y - py) / max(1, vy - py)
+        c = int(25 + frac * 10)
+        draw.line([(px, y), (px + ps - 1, y)], fill=(c, c + 3, c + 8))
+
+    # "LIVE" indicator dot (top-left of PiP)
+    dot_x, dot_y = px + 8, py + 8
+    draw.ellipse([dot_x, dot_y, dot_x + 6, dot_y + 6], fill=(255, 60, 60))
+    fnt_live = fr(10, bold=True)
+    draw.text((dot_x + 10, dot_y - 1), "LIVE", fill=(255, 60, 60), font=fnt_live)
+
+    # Border (1px subtle gray frame)
+    draw.rectangle([px - 1, py - 1, px + ps, py + ps], outline=PIP_BORDER_COL, width=1)
+
+
 def generate(filename, speed, limit, is_speeding=False, show_camera=False,
              camera_and_speeding=False):
     img = Image.new("RGB", (W, H), BG)
@@ -168,10 +246,12 @@ def generate(filename, speed, limit, is_speeding=False, show_camera=False,
         fnt_cam = fr(18, bold=True)
         draw.text((bx + 44, by + 10), "CAMERA", fill=cam_color, font=fnt_cam)
 
-    # -- Alert bar (bottom, only when needed) --
+    # -- Alert bar (bottom, shortened to avoid PiP overlap) --
     if is_speeding or show_camera:
         bar_h = 56
         bar_y = H - bar_h - 40
+        bar_x1 = 24
+        bar_x2 = PIP_X - 10  # stop before PiP area
 
         if camera_and_speeding:
             alert_color = RED
@@ -184,19 +264,23 @@ def generate(filename, speed, limit, is_speeding=False, show_camera=False,
             alert_text = "CAMERA AHEAD"
 
         # Glow
-        add_rect_glow(img, 20, bar_y, W - 20, bar_y + bar_h, alert_color, blur=25, strength=0.2)
+        add_rect_glow(img, bar_x1, bar_y, bar_x2, bar_y + bar_h, alert_color, blur=25, strength=0.2)
         draw = ImageDraw.Draw(img)
 
         # Bar background
         draw.rounded_rectangle(
-            [24, bar_y, W - 24, bar_y + bar_h], radius=14,
+            [bar_x1, bar_y, bar_x2, bar_y + bar_h], radius=14,
             fill=(alert_color[0] // 6, alert_color[1] // 6, alert_color[2] // 6),
             outline=alert_color, width=2,
         )
 
-        # Alert text - BIG enough to read
+        # Alert text centered in shortened bar
         fnt_alert = f(28, bold=True)
-        center_text(draw, W // 2, bar_y + bar_h // 2, alert_text, fnt_alert, alert_color)
+        bar_cx = (bar_x1 + bar_x2) // 2
+        center_text(draw, bar_cx, bar_y + bar_h // 2, alert_text, fnt_alert, alert_color)
+
+    # -- PiP camera preview (always drawn last, on top) --
+    draw_pip_preview(img, draw)
 
     img.save(filename, "PNG", quality=95)
     print(f"  -> {filename}")
