@@ -24,6 +24,8 @@
 #include <unistd.h>
 #include <pthread.h>
 #include <errno.h>
+#include <fcntl.h>
+#include <sys/mman.h>
 
 #include "rk_mpi_vi.h"
 #include "rk_mpi_vpss.h"
@@ -88,6 +90,12 @@
 #define PIP_X               (VO_SCREEN_WIDTH  - PIP_MARGIN - PIP_SIZE)  /* 350 */
 #define PIP_Y               (VO_SCREEN_HEIGHT - PIP_MARGIN - PIP_SIZE)  /* 350 */
 
+/* Framebuffer (for software PiP rendering -- bypasses VO/DRM) */
+#define FB_DEV              "/dev/fb0"
+#define FB_BPP              4                                  /* XRGB8888 */
+#define FB_STRIDE           (VO_SCREEN_WIDTH * FB_BPP)         /* 1920 */
+#define FB_SIZE             (FB_STRIDE * VO_SCREEN_HEIGHT)     /* 921600 */
+
 /* Pipeline */
 #define TARGET_FPS          25
 
@@ -104,6 +112,10 @@ static const char       *g_model_path  = NULL;
 
 /* PiP mode: camera in small corner window, framebuffer HUD visible */
 static int               g_pip_mode    = 0;
+
+/* Software PiP framebuffer state */
+static int               g_fb_fd       = -1;
+static uint8_t          *g_fb_map      = NULL;
 
 static void signal_handler(int sig) {
     (void)sig;
@@ -307,8 +319,15 @@ static int vpss_init(void) {
     chn0_attr.enCompressMode               = COMPRESS_MODE_NONE;
     chn0_attr.stFrameRate.s32SrcFrameRate  = -1;
     chn0_attr.stFrameRate.s32DstFrameRate  = -1;
-    chn0_attr.u32Depth                     = 0;  /* Bound to VO, no user GetChnFrame */
-    chn0_attr.u32FrameBufCnt               = 3;
+    if (g_pip_mode) {
+        /* PiP: user-mode frames for software framebuffer rendering */
+        chn0_attr.u32Depth       = 2;
+        chn0_attr.u32FrameBufCnt = 4;
+    } else {
+        /* Full-screen: bound to VO, no user GetChnFrame */
+        chn0_attr.u32Depth       = 0;
+        chn0_attr.u32FrameBufCnt = 3;
+    }
 
     ret = RK_MPI_VPSS_SetChnAttr(VPSS_GRP_ID, VPSS_CHN_DISPLAY, &chn0_attr);
     if (ret != 0) {
@@ -340,6 +359,119 @@ static void vpss_deinit(void) {
     RK_MPI_VPSS_StopGrp(VPSS_GRP_ID);
     RK_MPI_VPSS_DestroyGrp(VPSS_GRP_ID);
     printf("[INFO] VPSS deinitialized\n");
+}
+
+/* --------------------------------------------------------------------------
+ * Software PiP -- NV12-to-XRGB conversion + framebuffer direct write
+ *
+ * In PiP mode we bypass VO entirely (VO Enable takes over the DRM CRTC
+ * and disables the framebuffer primary plane).  Instead, VPSS outputs
+ * 480x480 NV12 in user-mode, and this thread point-samples down to
+ * 120x120 XRGB8888, writing directly into the mmap'd framebuffer.
+ * -------------------------------------------------------------------------- */
+
+static inline int clamp8(int v) {
+    return v < 0 ? 0 : (v > 255 ? 255 : v);
+}
+
+/*
+ * Point-sample 480x480 NV12 down to 120x120 XRGB8888 (4x downscale).
+ * BT.601 full-range conversion, integer fixed-point arithmetic.
+ */
+static void nv12_480_to_pip_xrgb(const uint8_t *nv12, uint8_t *xrgb) {
+    const int src_w  = DISPLAY_WIDTH;               /* 480 */
+    const int src_h  = DISPLAY_HEIGHT;              /* 480 */
+    const int scale  = DISPLAY_WIDTH / PIP_SIZE;    /* 4   */
+    const uint8_t *y_plane  = nv12;
+    const uint8_t *uv_plane = nv12 + src_w * src_h;
+
+    for (int dy = 0; dy < PIP_SIZE; dy++) {
+        int sy = dy * scale;
+        for (int dx = 0; dx < PIP_SIZE; dx++) {
+            int sx = dx * scale;
+
+            int y_val  = y_plane[sy * src_w + sx];
+            int uv_off = (sy / 2) * src_w + (sx & ~1);
+            int u = uv_plane[uv_off]     - 128;
+            int v = uv_plane[uv_off + 1] - 128;
+
+            int r = clamp8(y_val + ((359 * v) >> 8));
+            int g = clamp8(y_val - ((88 * u + 183 * v) >> 8));
+            int b = clamp8(y_val + ((454 * u) >> 8));
+
+            int off = (dy * PIP_SIZE + dx) * FB_BPP;
+            xrgb[off]     = (uint8_t)b;
+            xrgb[off + 1] = (uint8_t)g;
+            xrgb[off + 2] = (uint8_t)r;
+            xrgb[off + 3] = 0xFF;
+        }
+    }
+}
+
+static void *pip_render_thread(void *arg) {
+    (void)arg;
+
+    /* Open and mmap framebuffer */
+    g_fb_fd = open(FB_DEV, O_RDWR);
+    if (g_fb_fd < 0) {
+        printf("[ERROR] PiP: failed to open %s: %s\n", FB_DEV, strerror(errno));
+        return NULL;
+    }
+
+    g_fb_map = mmap(NULL, FB_SIZE, PROT_READ | PROT_WRITE, MAP_SHARED,
+                    g_fb_fd, 0);
+    if (g_fb_map == MAP_FAILED) {
+        printf("[ERROR] PiP: failed to mmap framebuffer: %s\n", strerror(errno));
+        g_fb_map = NULL;
+        close(g_fb_fd);
+        g_fb_fd = -1;
+        return NULL;
+    }
+
+    printf("[INFO] PiP render: fb mapped (%dx%d XRGB8888, stride=%d)\n",
+           VO_SCREEN_WIDTH, VO_SCREEN_HEIGHT, FB_STRIDE);
+
+    /* Per-frame XRGB buffer for the 120x120 PiP region */
+    static uint8_t pip_xrgb[PIP_SIZE * PIP_SIZE * FB_BPP];
+
+    VIDEO_FRAME_INFO_S frame;
+    int frame_count = 0;
+
+    while (g_running) {
+        int ret = RK_MPI_VPSS_GetChnFrame(VPSS_GRP_ID, VPSS_CHN_DISPLAY,
+                                           &frame, 100);
+        if (ret != 0)
+            continue;
+
+        void *vaddr = RK_MPI_MB_Handle2VirAddr(frame.stVFrame.pMbBlk);
+        if (vaddr) {
+            /* NV12 480x480 -> XRGB 120x120 */
+            nv12_480_to_pip_xrgb((const uint8_t *)vaddr, pip_xrgb);
+
+            /* Blit 120x120 PiP region into framebuffer via mmap */
+            for (int y = 0; y < PIP_SIZE; y++) {
+                int fb_off  = (PIP_Y + y) * FB_STRIDE + PIP_X * FB_BPP;
+                int pip_off = y * PIP_SIZE * FB_BPP;
+                memcpy(g_fb_map + fb_off, pip_xrgb + pip_off,
+                       PIP_SIZE * FB_BPP);
+            }
+            frame_count++;
+        }
+
+        RK_MPI_VPSS_ReleaseChnFrame(VPSS_GRP_ID, VPSS_CHN_DISPLAY, &frame);
+    }
+
+    printf("[INFO] PiP render exiting (%d frames rendered)\n", frame_count);
+
+    if (g_fb_map) {
+        munmap(g_fb_map, FB_SIZE);
+        g_fb_map = NULL;
+    }
+    if (g_fb_fd >= 0) {
+        close(g_fb_fd);
+        g_fb_fd = -1;
+    }
+    return NULL;
 }
 
 /* --------------------------------------------------------------------------
@@ -514,20 +646,23 @@ static int bind_pipeline(void) {
     printf("[INFO] Bound VI(pipe=%d,chn=%d) -> VPSS(grp=%d)\n",
            VI_PIPE_ID, VI_CHN_ID, VPSS_GRP_ID);
 
-    /* VPSS CHN0 -> VO */
-    ret = RK_MPI_SYS_Bind(&g_vpss_chn_display, &g_vo_chn);
-    if (ret != 0) {
-        printf("[ERROR] Bind VPSS -> VO failed: 0x%x\n", ret);
-        return ret;
+    /* VPSS CHN0 -> VO (skip in PiP mode: software rendering via framebuffer) */
+    if (!g_pip_mode) {
+        ret = RK_MPI_SYS_Bind(&g_vpss_chn_display, &g_vo_chn);
+        if (ret != 0) {
+            printf("[ERROR] Bind VPSS -> VO failed: 0x%x\n", ret);
+            return ret;
+        }
+        printf("[INFO] Bound VPSS(grp=%d,chn=%d) -> VO(layer=%d,chn=%d)\n",
+               VPSS_GRP_ID, VPSS_CHN_DISPLAY, VO_LAYER_ID, VO_CHN_ID);
     }
-    printf("[INFO] Bound VPSS(grp=%d,chn=%d) -> VO(layer=%d,chn=%d)\n",
-           VPSS_GRP_ID, VPSS_CHN_DISPLAY, VO_LAYER_ID, VO_CHN_ID);
 
     return 0;
 }
 
 static void unbind_pipeline(void) {
-    RK_MPI_SYS_UnBind(&g_vpss_chn_display, &g_vo_chn);
+    if (!g_pip_mode)
+        RK_MPI_SYS_UnBind(&g_vpss_chn_display, &g_vo_chn);
     RK_MPI_SYS_UnBind(&g_vi_chn, &g_vpss_grp);
     printf("[INFO] Pipeline unbound\n");
 }
@@ -648,10 +783,15 @@ int main(int argc, char *argv[]) {
         goto cleanup_vi;
     }
 
-    ret = vo_init();
-    if (ret != 0) {
-        printf("[ERROR] VO init failed, aborting\n");
-        goto cleanup_vpss;
+    /* VO is only used in full-screen mode.  In PiP mode, the software
+     * PiP thread renders camera frames directly to the framebuffer,
+     * avoiding the VO/DRM overlay plane that would disable /dev/fb0. */
+    if (!g_pip_mode) {
+        ret = vo_init();
+        if (ret != 0) {
+            printf("[ERROR] VO init failed, aborting\n");
+            goto cleanup_vpss;
+        }
     }
 
     /* ---- Step 3: Bind pipeline ---- */
@@ -662,7 +802,10 @@ int main(int argc, char *argv[]) {
         goto cleanup_vo;
     }
 
-    printf("[INFO] Pipeline started: VI -> VPSS -> VO\n");
+    if (g_pip_mode)
+        printf("[INFO] Pipeline started: VI -> VPSS -> software PiP\n");
+    else
+        printf("[INFO] Pipeline started: VI -> VPSS -> VO\n");
 
     /* ---- Step 4: Initialize NPU inference (optional) ---- */
     if (g_model_path) {
@@ -684,6 +827,20 @@ int main(int argc, char *argv[]) {
     }
 
     printf("[INFO] Press Ctrl+C to stop\n");
+
+    /* ---- Step 4b: Start PiP render thread (reads VPSS, writes framebuffer) ---- */
+    pthread_t pip_tid;
+    int pip_thread_created = 0;
+    if (g_pip_mode) {
+        ret = pthread_create(&pip_tid, NULL, pip_render_thread, NULL);
+        if (ret != 0) {
+            printf("[WARN] Failed to create PiP render thread: %s\n",
+                   strerror(ret));
+        } else {
+            pip_thread_created = 1;
+            printf("[INFO] PiP render thread started\n");
+        }
+    }
 
     /* ---- Step 5: Start FPS monitor thread ---- */
     int fps_thread_created = 0;
@@ -720,13 +877,17 @@ int main(int argc, char *argv[]) {
         printf("[INFO] NPU released\n");
     }
 
+    if (pip_thread_created)
+        pthread_join(pip_tid, NULL);
+
     if (fps_thread_created)
         pthread_join(fps_tid, NULL);
 
     unbind_pipeline();
 
 cleanup_vo:
-    vo_deinit();
+    if (!g_pip_mode)
+        vo_deinit();
 
 cleanup_vpss:
     vpss_deinit();
