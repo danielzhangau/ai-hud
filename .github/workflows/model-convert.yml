@@ -39,11 +39,15 @@ jobs:
           python-version: '3.10'
 
       # ---- Install rknn-toolkit2 ----
+      # Pin onnx<=1.15.0: onnx>=1.16.0 removed onnx.mapping module
+      # which rknn-toolkit2 2.3.x still depends on
       - name: Install rknn-toolkit2
         run: |
           pip install --upgrade pip
+          pip install "onnx>=1.14.0,<=1.15.0"
           pip install rknn-toolkit2
           python -c "from rknn.api import RKNN; print('rknn-toolkit2 installed successfully')"
+          python -c "import onnx; print(f'onnx version: {onnx.__version__}')"
 
       # ---- Download ONNX model ----
       - name: Download ONNX model
