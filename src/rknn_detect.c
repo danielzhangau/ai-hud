@@ -1,7 +1,7 @@
 /*
  * rknn_detect.c
  *
- * RKNN NPU inference wrapper for YOLOv5n @ 320x320 INT8 on RV1106G3.
+ * RKNN NPU inference wrapper for YOLOv5n INT8 on RV1106G3.
  *
  * Uses the RKNN C API with zero-copy memory management, which is the
  * required approach on RV1103/RV1106 platforms. The runtime library is
@@ -56,8 +56,8 @@ static inline int64_t get_current_time_us(void) {
  * Output: packed RGB888 (w*h*3)
  *
  * On RV1106, hardware RGA could be used for this conversion, but for
- * simplicity and portability we use a CPU implementation. At 320x320
- * the overhead is minimal (~0.5ms).
+ * simplicity and portability we use a CPU implementation. At 480x480
+ * the overhead is ~1ms on Cortex-A7.
  */
 static void nv12_to_rgb(const uint8_t *nv12, uint8_t *rgb,
                          int width, int height) {
@@ -88,6 +88,31 @@ static void nv12_to_rgb(const uint8_t *nv12, uint8_t *rgb,
             rgb[rgb_idx + 0] = (uint8_t)r;
             rgb[rgb_idx + 1] = (uint8_t)g;
             rgb[rgb_idx + 2] = (uint8_t)b;
+        }
+    }
+}
+
+/*
+ * Nearest-neighbor RGB888 resize.
+ *
+ * Used when the VPSS output size doesn't match the model input size
+ * (e.g. VPSS CHN0 outputs 480x480 but model expects 640x640).
+ * Integer-only arithmetic for ARM Cortex-A7 efficiency.
+ */
+static void resize_rgb_nearest(const uint8_t *src, int src_w, int src_h,
+                                uint8_t *dst, int dst_w, int dst_h) {
+    for (int dy = 0; dy < dst_h; dy++) {
+        int sy = dy * src_h / dst_h;
+        const uint8_t *src_row = src + sy * src_w * 3;
+        uint8_t *dst_row = dst + dy * dst_w * 3;
+
+        for (int dx = 0; dx < dst_w; dx++) {
+            int sx = dx * src_w / dst_w;
+            const uint8_t *sp = src_row + sx * 3;
+            uint8_t *dp = dst_row + dx * 3;
+            dp[0] = sp[0];
+            dp[1] = sp[1];
+            dp[2] = sp[2];
         }
     }
 }
@@ -278,17 +303,43 @@ int rknn_detect_run(rknn_detect_ctx_t *ctx,
     if (!ctx || !ctx->initialized || !nv12_data || !group)
         return -1;
 
-    if (width != ctx->model_width || height != ctx->model_height) {
-        printf("[ERROR] Frame size mismatch: got %dx%d, expected %dx%d\n",
-               width, height, ctx->model_width, ctx->model_height);
-        return -1;
-    }
+    int model_w = ctx->model_width;
+    int model_h = ctx->model_height;
 
     int ret;
     int64_t t0, t1, t2;
 
-    /* ---- Convert NV12 to RGB888 ---- */
-    nv12_to_rgb(nv12_data, ctx->rgb_buf, width, height);
+    /* ---- Convert NV12 to RGB888 (with optional resize) ---- */
+    if (width == model_w && height == model_h) {
+        /* Fast path: frame matches model input -- direct conversion */
+        nv12_to_rgb(nv12_data, ctx->rgb_buf, width, height);
+    } else {
+        /*
+         * Resize path: frame size differs from model input.
+         * 1) NV12->RGB at source resolution
+         * 2) Nearest-neighbor resize to model input size
+         *
+         * Typical case: VPSS CHN0 outputs 480x480, model expects 640x640.
+         */
+        int needed = width * height * 3;
+        if (!ctx->frame_rgb_buf ||
+            ctx->frame_buf_w != width || ctx->frame_buf_h != height) {
+            free(ctx->frame_rgb_buf);
+            ctx->frame_rgb_buf = (uint8_t *)malloc(needed);
+            if (!ctx->frame_rgb_buf) {
+                printf("[ERROR] Failed to allocate frame RGB buffer (%dx%d)\n",
+                       width, height);
+                return -1;
+            }
+            ctx->frame_buf_w = width;
+            ctx->frame_buf_h = height;
+            printf("[INFO] Allocated frame RGB buffer: %dx%d -> %dx%d resize\n",
+                   width, height, model_w, model_h);
+        }
+        nv12_to_rgb(nv12_data, ctx->frame_rgb_buf, width, height);
+        resize_rgb_nearest(ctx->frame_rgb_buf, width, height,
+                           ctx->rgb_buf, model_w, model_h);
+    }
 
     /* ---- Copy RGB data into input tensor memory ---- */
     rknn_tensor_mem *input_mem = (rknn_tensor_mem *)ctx->input_mem;
@@ -329,11 +380,15 @@ int rknn_detect_run(rknn_detect_ctx_t *ctx,
      * Output tensors are already in zero-copy memory. Access directly
      * via output_mem[i]->virt_addr.
      *
-     * scale_w and scale_h are both 1.0 here because the VPSS already
-     * resized the frame to 320x320 (matching model input exactly).
+     * scale_w/scale_h map detected box coordinates from model space back
+     * to the original frame space. When frame == model size, both are 1.0.
+     * When resized (e.g. 480->640), scale = model_dim / frame_dim.
+     *
+     * Note: For HUD display we only use class_id and confidence, so
+     * exact box coordinates are not critical.
      */
-    float scale_w = 1.0f;
-    float scale_h = 1.0f;
+    float scale_w = (float)model_w / (float)width;
+    float scale_h = (float)model_h / (float)height;
 
     rknn_tensor_mem *out0 = (rknn_tensor_mem *)ctx->output_mem[0];
     rknn_tensor_mem *out1 = (rknn_tensor_mem *)ctx->output_mem[1];
@@ -378,11 +433,11 @@ static void *inference_thread_func(void *arg) {
 
     while (!ctx->thread_should_stop) {
         /*
-         * Grab a frame from VPSS CHN1 (320x320 NV12).
+         * Grab a frame from VPSS (NV12).
          *
          * RK_MPI_VPSS_GetChnFrame() blocks up to the timeout waiting for
          * a new frame. The frame buffer is a hardware DMA buffer managed
-         * by RKMPI.
+         * by RKMPI. On RV1106, we use CHN0 (shared with display bind).
          */
         VIDEO_FRAME_INFO_S frame_info;
         memset(&frame_info, 0, sizeof(frame_info));
@@ -554,10 +609,16 @@ void rknn_detect_release(rknn_detect_ctx_t *ctx) {
         ctx->rknn_ctx = 0;
     }
 
-    /* Free RGB conversion buffer */
+    /* Free RGB conversion buffers */
     if (ctx->rgb_buf) {
         free(ctx->rgb_buf);
         ctx->rgb_buf = NULL;
+    }
+    if (ctx->frame_rgb_buf) {
+        free(ctx->frame_rgb_buf);
+        ctx->frame_rgb_buf = NULL;
+        ctx->frame_buf_w = 0;
+        ctx->frame_buf_h = 0;
     }
 
     pthread_mutex_destroy(&ctx->result_mutex);

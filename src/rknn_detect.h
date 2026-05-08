@@ -1,17 +1,18 @@
 /*
  * rknn_detect.h
  *
- * RKNN NPU inference wrapper for YOLOv5n @ 320x320 INT8 on RV1106G3.
+ * RKNN NPU inference wrapper for YOLOv5n INT8 on RV1106G3.
  *
  * Uses the RKNN C API with zero-copy memory (rknn_create_mem / rknn_set_io_mem)
  * which is the recommended approach on RV1106. The runtime library on this
  * platform is librknnmrt.so (mini runtime), not the full librknnrt.so.
+ * Supports automatic resize when input frame size differs from model input.
  *
  * Thread-safety: The detector context is designed to run in a dedicated
  * inference thread. The public API is NOT thread-safe -- callers must
  * ensure serialized access or use one context per thread.
  *
- * Input: NV12 320x320 from VPSS CHN1 (zero-copy via RKMPI memory block)
+ * Input: NV12 from VPSS CHN0 (any resolution; auto-resized to model input)
  * Output: Detection results (bounding boxes, class labels, confidence)
  */
 
@@ -54,7 +55,7 @@ typedef struct _rknn_detect_ctx_t {
 
     /*
      * Tensor memory handles (RKNN zero-copy).
-     * input_mem[0]  = model input  (320x320 RGB/NV12)
+     * input_mem[0]  = model input  (RGB, model dimensions)
      * output_mem[0..2] = model outputs (3 detection heads)
      *
      * Using void* to avoid exposing rknn_api.h in this header.
@@ -90,8 +91,16 @@ typedef struct _rknn_detect_ctx_t {
     uint64_t            total_frames;
     uint64_t            total_detections;
 
-    /* NV12-to-RGB conversion buffer (320*320*3 bytes) */
+    /* NV12-to-RGB conversion buffer (model_w * model_h * 3 bytes) */
     uint8_t            *rgb_buf;
+
+    /*
+     * Source-resolution RGB buffer for frames that don't match model input.
+     * Lazily allocated on first use in rknn_detect_run().
+     */
+    uint8_t            *frame_rgb_buf;
+    int                 frame_buf_w;
+    int                 frame_buf_h;
 
 } rknn_detect_ctx_t;
 
@@ -119,9 +128,9 @@ int rknn_detect_init(rknn_detect_ctx_t *ctx, const char *model_path);
  * and applies post-processing. Results are stored in ctx->det_result.
  *
  * @ctx:       Initialized detector context
- * @nv12_data: Pointer to NV12 frame data (320*320*1.5 bytes)
- * @width:     Frame width  (must be 320)
- * @height:    Frame height (must be 320)
+ * @nv12_data: Pointer to NV12 frame data (width*height*1.5 bytes)
+ * @width:     Frame width  (any; auto-resized to model input)
+ * @height:    Frame height (any; auto-resized to model input)
  * @group:     Output detection results (caller-allocated)
  *
  * Returns 0 on success, negative on error.
@@ -133,13 +142,13 @@ int rknn_detect_run(rknn_detect_ctx_t *ctx,
 /*
  * rknn_detect_start_thread - Start the background inference thread.
  *
- * The thread continuously grabs frames from VPSS CHN1, runs inference,
+ * The thread continuously grabs frames from the specified VPSS channel, runs inference,
  * and updates the latest detection results. Use rknn_detect_get_result()
  * to retrieve the most recent results.
  *
  * @ctx:         Initialized detector context
  * @vpss_grp:    VPSS group ID
- * @vpss_chn:    VPSS channel ID (typically CHN1 for NPU)
+ * @vpss_chn:    VPSS channel ID (CHN0 on RV1106, shared with display)
  *
  * Returns 0 on success, negative on error.
  */

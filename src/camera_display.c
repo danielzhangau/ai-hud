@@ -4,9 +4,9 @@
  * Camera + Display pipeline for Luckfox Pico Ultra (RV1106G3)
  * Pipeline: VI (SC3336 MIPI CSI) -> VPSS -> VO (DPI LCD 480x480)
  *
- * VPSS dual-channel configuration:
- *   Channel 0: 480x480 NV12 -> VO display output
- *   Channel 1: 320x320 NV12 -> NPU inference (when --model is specified)
+ * VPSS single-channel configuration (RV1106 limitation: one output per group):
+ *   Channel 0: 480x480 NV12 -> VO display (bind) + NPU inference (GetChnFrame)
+ *   Inference thread resizes 480x480 -> model input size in software.
  *
  * Usage:
  *   ./ai-hud                              Display-only mode
@@ -46,19 +46,17 @@
 
 /* VPSS (Video Processing Sub-System) */
 #define VPSS_GRP_ID         0
-#define VPSS_CHN_DISPLAY    0       /* Channel 0: display output   */
-#define VPSS_CHN_NPU        1       /* Channel 1: NPU input (reserved) */
+#define VPSS_CHN_DISPLAY    0       /* Channel 0: display + NPU shared */
 
 #define DISPLAY_WIDTH       480
 #define DISPLAY_HEIGHT      480
 
 /*
- * NPU input size must match the RKNN model's expected input dimensions.
- * COCO yolov5n.onnx from airockchip uses 640x640.
- * Custom 320x320 models: change these to 320.
+ * RV1106 VPSS limitation: only one active output channel per group.
+ * CHN1 always returns NOBUF (0xa006800e). Workaround: use CHN0 for
+ * both display (via bind to VO) and NPU (via GetChnFrame with u32Depth>=1).
+ * The inference thread resizes 480x480 -> model input size in software.
  */
-#define NPU_WIDTH           640
-#define NPU_HEIGHT          640
 
 /* VO (Video Output) */
 #define VO_DEV_ID           0
@@ -254,8 +252,8 @@ static int vpss_init(void) {
     chn0_attr.enCompressMode               = COMPRESS_MODE_NONE;
     chn0_attr.stFrameRate.s32SrcFrameRate  = -1;
     chn0_attr.stFrameRate.s32DstFrameRate  = -1;
-    chn0_attr.u32Depth                     = 1;
-    chn0_attr.u32FrameBufCnt               = 3;
+    chn0_attr.u32Depth                     = 2;  /* allow user-mode GetChnFrame */
+    chn0_attr.u32FrameBufCnt               = 4;
 
     ret = RK_MPI_VPSS_SetChnAttr(VPSS_GRP_ID, VPSS_CHN_DISPLAY, &chn0_attr);
     if (ret != 0) {
@@ -269,31 +267,6 @@ static int vpss_init(void) {
         return ret;
     }
 
-    /* ---- Channel 1: NPU input (user-mode GetChnFrame) ---- */
-    VPSS_CHN_ATTR_S chn1_attr;
-    memset(&chn1_attr, 0, sizeof(chn1_attr));
-    chn1_attr.enChnMode                    = VPSS_CHN_MODE_AUTO;
-    chn1_attr.u32Width                     = NPU_WIDTH;
-    chn1_attr.u32Height                    = NPU_HEIGHT;
-    chn1_attr.enPixelFormat                = RK_FMT_YUV420SP;  /* NV12 */
-    chn1_attr.enCompressMode               = COMPRESS_MODE_NONE;
-    chn1_attr.stFrameRate.s32SrcFrameRate  = -1;
-    chn1_attr.stFrameRate.s32DstFrameRate  = TARGET_FPS;
-    chn1_attr.u32Depth                     = 2;
-    chn1_attr.u32FrameBufCnt               = 4;
-
-    ret = RK_MPI_VPSS_SetChnAttr(VPSS_GRP_ID, VPSS_CHN_NPU, &chn1_attr);
-    if (ret != 0) {
-        printf("[ERROR] RK_MPI_VPSS_SetChnAttr(CHN1) failed: 0x%x\n", ret);
-        return ret;
-    }
-
-    ret = RK_MPI_VPSS_EnableChn(VPSS_GRP_ID, VPSS_CHN_NPU);
-    if (ret != 0) {
-        printf("[ERROR] RK_MPI_VPSS_EnableChn(CHN1) failed: 0x%x\n", ret);
-        return ret;
-    }
-
     /* ---- Start VPSS group ---- */
     ret = RK_MPI_VPSS_StartGrp(VPSS_GRP_ID);
     if (ret != 0) {
@@ -301,15 +274,13 @@ static int vpss_init(void) {
         return ret;
     }
 
-    printf("[INFO] VPSS initialized: grp=%d\n", VPSS_GRP_ID);
-    printf("[INFO]   CHN0 (display): %dx%d NV12\n", DISPLAY_WIDTH, DISPLAY_HEIGHT);
-    printf("[INFO]   CHN1 (npu):     %dx%d NV12\n", NPU_WIDTH, NPU_HEIGHT);
+    printf("[INFO] VPSS initialized: grp=%d, CHN0 %dx%d NV12 (display+NPU)\n",
+           VPSS_GRP_ID, DISPLAY_WIDTH, DISPLAY_HEIGHT);
     return 0;
 }
 
 static void vpss_deinit(void) {
-    /* Disable channels before stopping group (RKMPI requirement) */
-    RK_MPI_VPSS_DisableChn(VPSS_GRP_ID, VPSS_CHN_NPU);
+    /* Disable channel before stopping group (RKMPI requirement) */
     RK_MPI_VPSS_DisableChn(VPSS_GRP_ID, VPSS_CHN_DISPLAY);
     RK_MPI_VPSS_StopGrp(VPSS_GRP_ID);
     RK_MPI_VPSS_DestroyGrp(VPSS_GRP_ID);
@@ -524,7 +495,7 @@ static void print_usage(const char *prog) {
     printf("  -h, --help          Show this help\n");
     printf("\n");
     printf("Without --model, runs display-only (VI -> VPSS -> VO).\n");
-    printf("With --model, starts NPU inference on VPSS CHN1.\n");
+    printf("With --model, starts NPU inference on VPSS CHN0.\n");
 }
 
 int main(int argc, char *argv[]) {
@@ -611,14 +582,14 @@ int main(int argc, char *argv[]) {
             printf("[WARN] RKNN init failed, continuing without NPU\n");
         } else {
             ret = rknn_detect_start_thread(&g_detector,
-                                           VPSS_GRP_ID, VPSS_CHN_NPU);
+                                           VPSS_GRP_ID, VPSS_CHN_DISPLAY);
             if (ret != 0) {
                 printf("[WARN] RKNN thread start failed\n");
                 rknn_detect_release(&g_detector);
             } else {
                 g_npu_enabled = 1;
                 printf("[INFO] NPU inference thread started on VPSS CHN%d\n",
-                       VPSS_CHN_NPU);
+                       VPSS_CHN_DISPLAY);
             }
         }
     }
@@ -641,9 +612,9 @@ int main(int argc, char *argv[]) {
      *   VI captures -> VPSS scales -> VO displays
      * No manual frame get/release is needed for the display path.
      *
-     * The NPU channel (VPSS CHN1) is available for a separate inference
-     * thread to call RK_MPI_VPSS_GetChnFrame() / ReleaseChnFrame() on
-     * VPSS_CHN_NPU when that module is implemented.
+     * When --model is specified, the NPU inference thread concurrently
+     * calls GetChnFrame() on VPSS CHN0 (u32Depth>=1 enables this alongside
+     * the VO bind). Frames are resized in software to model input size.
      */
     while (g_running) {
         usleep(100 * 1000);  /* 100ms idle poll */
@@ -653,7 +624,7 @@ int main(int argc, char *argv[]) {
 
     /* ---- Step 7: Cleanup (reverse order) ---- */
 
-    /* Stop NPU inference thread first (it reads from VPSS CHN1) */
+    /* Stop NPU inference thread first (it reads from VPSS CHN0) */
     if (g_npu_enabled) {
         rknn_detect_release(&g_detector);
         g_npu_enabled = 0;
