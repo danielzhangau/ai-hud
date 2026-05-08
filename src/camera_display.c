@@ -26,6 +26,7 @@
 #include "rk_mpi_vo.h"
 #include "rk_mpi_sys.h"
 #include "rk_mpi_mb.h"
+#include "sample_comm_isp.h"
 
 /* --------------------------------------------------------------------------
  * Constants
@@ -82,56 +83,119 @@ static void install_signal_handlers(void) {
 }
 
 /* --------------------------------------------------------------------------
+ * ISP -- Image Signal Processor (must start before VI)
+ *
+ * Mandatory boot order per RKMPI spec:
+ *   1) ISP Init -> ISP Run
+ *   2) VI EnableDev -> VI EnableChn
+ * Shutdown order:
+ *   1) VI DisableChn -> VI DisableDev
+ *   2) ISP Stop
+ * -------------------------------------------------------------------------- */
+
+#define ISP_CAM_ID          0
+#define IQ_FILE_DIR         "/etc/iqfiles"
+
+static int isp_init(void) {
+    int ret;
+
+    ret = SAMPLE_COMM_ISP_Init(ISP_CAM_ID, RK_AIQ_WORKING_MODE_NORMAL,
+                               RK_FALSE, IQ_FILE_DIR);
+    if (ret != 0) {
+        printf("[ERROR] SAMPLE_COMM_ISP_Init failed: %d\n", ret);
+        return ret;
+    }
+
+    ret = SAMPLE_COMM_ISP_Run(ISP_CAM_ID);
+    if (ret != 0) {
+        printf("[ERROR] SAMPLE_COMM_ISP_Run failed: %d\n", ret);
+        return ret;
+    }
+
+    printf("[INFO] ISP initialized: cam=%d, iq=%s\n", ISP_CAM_ID, IQ_FILE_DIR);
+    return 0;
+}
+
+static void isp_deinit(void) {
+    SAMPLE_COMM_ISP_Stop(ISP_CAM_ID);
+    printf("[INFO] ISP stopped\n");
+}
+
+/* --------------------------------------------------------------------------
  * VI -- Video Input (camera capture via ISP)
+ *
+ * Follows the official LuckfoxTECH RKMPI example pattern:
+ *   - All-zero VI_DEV_ATTR_S (defaults handled by driver)
+ *   - Check-before-configure to avoid double-init
+ *   - Bind dev to pipe explicitly
+ *   - DMA-BUF memory type for VI channel ISP option
  * -------------------------------------------------------------------------- */
 
 static int vi_init(void) {
     int ret;
+    int dev_id  = VI_PIPE_ID;
+    int pipe_id = VI_PIPE_ID;
 
-    /* ---- Configure VI device (pipe) ---- */
+    /* ---- Configure VI device (use all-zero defaults, driver auto-fills) ---- */
     VI_DEV_ATTR_S dev_attr;
     memset(&dev_attr, 0, sizeof(dev_attr));
-    dev_attr.enIntfMode     = VI_MODE_MIPI;
-    dev_attr.enWorkMode     = VI_WORK_MODE_1Multiplex;
-    dev_attr.enInputDataType = VI_DATA_TYPE_YUV;
-    dev_attr.stMaxSize.u32Width  = VI_WIDTH;
-    dev_attr.stMaxSize.u32Height = VI_HEIGHT;
 
-    ret = RK_MPI_VI_SetDevAttr(VI_PIPE_ID, &dev_attr);
-    if (ret != 0) {
-        printf("[ERROR] RK_MPI_VI_SetDevAttr failed: 0x%x\n", ret);
-        return ret;
+    ret = RK_MPI_VI_GetDevAttr(dev_id, &dev_attr);
+    if (ret == RK_ERR_VI_NOT_CONFIG) {
+        ret = RK_MPI_VI_SetDevAttr(dev_id, &dev_attr);
+        if (ret != 0) {
+            printf("[ERROR] RK_MPI_VI_SetDevAttr failed: 0x%x\n", ret);
+            return ret;
+        }
     }
 
-    ret = RK_MPI_VI_EnableDev(VI_PIPE_ID);
+    /* ---- Enable device if not already enabled ---- */
+    ret = RK_MPI_VI_GetDevIsEnable(dev_id);
     if (ret != 0) {
-        printf("[ERROR] RK_MPI_VI_EnableDev failed: 0x%x\n", ret);
-        return ret;
+        ret = RK_MPI_VI_EnableDev(dev_id);
+        if (ret != 0) {
+            printf("[ERROR] RK_MPI_VI_EnableDev failed: 0x%x\n", ret);
+            return ret;
+        }
+
+        /* ---- Bind device to pipe ---- */
+        VI_DEV_BIND_PIPE_S bind_pipe;
+        memset(&bind_pipe, 0, sizeof(bind_pipe));
+        bind_pipe.u32Num     = 1;
+        bind_pipe.PipeId[0]  = pipe_id;
+
+        ret = RK_MPI_VI_SetDevBindPipe(dev_id, &bind_pipe);
+        if (ret != 0) {
+            printf("[ERROR] RK_MPI_VI_SetDevBindPipe failed: 0x%x\n", ret);
+            return ret;
+        }
     }
 
     /* ---- Configure VI channel ---- */
     VI_CHN_ATTR_S chn_attr;
     memset(&chn_attr, 0, sizeof(chn_attr));
-    chn_attr.stSize.u32Width  = VI_WIDTH;
-    chn_attr.stSize.u32Height = VI_HEIGHT;
-    chn_attr.enPixelFormat    = RK_FMT_YUV420SP;   /* NV12 */
-    chn_attr.u32Depth         = 2;                  /* Buffer depth */
-    chn_attr.enCompressMode   = COMPRESS_MODE_NONE;
+    chn_attr.stSize.u32Width       = VI_WIDTH;
+    chn_attr.stSize.u32Height      = VI_HEIGHT;
+    chn_attr.enPixelFormat         = RK_FMT_YUV420SP;   /* NV12 */
+    chn_attr.u32Depth              = 2;                  /* User get-list depth */
+    chn_attr.enCompressMode        = COMPRESS_MODE_NONE;
+    chn_attr.stIspOpt.u32BufCount  = 2;
+    chn_attr.stIspOpt.enMemoryType = VI_V4L2_MEMORY_TYPE_DMABUF;
 
-    ret = RK_MPI_VI_SetChnAttr(VI_PIPE_ID, VI_CHN_ID, &chn_attr);
+    ret = RK_MPI_VI_SetChnAttr(pipe_id, VI_CHN_ID, &chn_attr);
     if (ret != 0) {
         printf("[ERROR] RK_MPI_VI_SetChnAttr failed: 0x%x\n", ret);
         return ret;
     }
 
-    ret = RK_MPI_VI_EnableChn(VI_PIPE_ID, VI_CHN_ID);
+    ret = RK_MPI_VI_EnableChn(pipe_id, VI_CHN_ID);
     if (ret != 0) {
         printf("[ERROR] RK_MPI_VI_EnableChn failed: 0x%x\n", ret);
         return ret;
     }
 
     printf("[INFO] VI initialized: pipe=%d, chn=%d, %dx%d NV12\n",
-           VI_PIPE_ID, VI_CHN_ID, VI_WIDTH, VI_HEIGHT);
+           pipe_id, VI_CHN_ID, VI_WIDTH, VI_HEIGHT);
     return 0;
 }
 
@@ -433,15 +497,22 @@ int main(int argc, char *argv[]) {
     /* Signal handlers for graceful shutdown */
     install_signal_handlers();
 
-    /* ---- Step 1: Initialize MPI system ---- */
+    /* ---- Step 1: ISP must start before VI (RKMPI requirement) ---- */
+    ret = isp_init();
+    if (ret != 0) {
+        printf("[ERROR] ISP init failed, aborting\n");
+        return -1;
+    }
+
+    /* ---- Step 2: Initialize MPI system ---- */
     ret = RK_MPI_SYS_Init();
     if (ret != 0) {
         printf("[ERROR] RK_MPI_SYS_Init failed: 0x%x\n", ret);
-        return -1;
+        goto cleanup_isp;
     }
     printf("[INFO] MPI system initialized\n");
 
-    /* ---- Step 2: Initialize modules ---- */
+    /* ---- Step 3: Initialize modules ---- */
     ret = vi_init();
     if (ret != 0) {
         printf("[ERROR] VI init failed, aborting\n");
@@ -515,6 +586,9 @@ cleanup_vi:
 cleanup_sys:
     RK_MPI_SYS_Exit();
     printf("[INFO] MPI system exited\n");
+
+cleanup_isp:
+    isp_deinit();
 
     printf("[INFO] Shutdown complete\n");
     return 0;

@@ -96,6 +96,12 @@ include_directories(
     ${RKMPI_INC_DIR}
     ${RKMPI_INC_DIR}/rockit
     ${RKMPI_INC_DIR}/rkaiq
+    ${RKMPI_INC_DIR}/rkaiq/uAPI2
+    ${RKMPI_INC_DIR}/rkaiq/common
+    ${RKMPI_INC_DIR}/rkaiq/xcore
+    ${RKMPI_INC_DIR}/rkaiq/algos
+    ${RKMPI_INC_DIR}/rkaiq/iq_parser
+    ${RKMPI_INC_DIR}/rkaiq/iq_parser_v2
     ${RKMPI_INC_DIR}/rknn         # RKNN API headers (rknn_api.h)
 )
 
@@ -129,7 +135,9 @@ set(SOURCES
 add_executable(${PROJECT_NAME} ${SOURCES})
 
 target_link_libraries(${PROJECT_NAME}
+    sample_comm     # ISP init/run/stop convenience functions
     rockit_full     # RKMPI full (VI, VPSS, VO, SYS -- rockit_tiny lacks VO)
+    rkaiq           # RKAIQ ISP image quality engine
     rockchip_mpp    # Rockchip MPP codec/output backend
     rga             # 2D graphics acceleration (used by rockit internally)
     rknnmrt         # RKNN NPU runtime (RV1106 mini runtime)
