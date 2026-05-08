@@ -39,8 +39,8 @@ jobs:
           echo "=== RKMPI uclibc libs ==="
           ls /opt/rkmpi/lib/uclibc/lib*.so | head -5
 
-      # ---- Build the application ----
-      - name: Build
+      # ---- Build the application (production: 9-class speed signs) ----
+      - name: Build (production)
         run: |
           mkdir -p build && cd build
           cmake .. \
@@ -49,17 +49,41 @@ jobs:
             -DRKMPI_DIR=/opt/rkmpi
           make -j$(nproc) VERBOSE=1
 
-      # ---- Strip and show binary info ----
-      - name: Strip binary
+      # ---- Build COCO test variant (80-class for NPU pipeline testing) ----
+      - name: Build (COCO test)
         run: |
-          /opt/toolchain/bin/arm-rockchip830-linux-uclibcgnueabihf-strip build/ai-hud
+          mkdir -p build-coco && cd build-coco
+          cmake .. \
+            -DCMAKE_TOOLCHAIN_FILE=../cmake/rv1106-toolchain.cmake \
+            -DTOOLCHAIN_DIR=/opt/toolchain \
+            -DRKMPI_DIR=/opt/rkmpi \
+            -DCOCO_TEST=ON
+          make -j$(nproc)
+
+      # ---- Strip and show binary info ----
+      - name: Strip binaries
+        run: |
+          STRIP=/opt/toolchain/bin/arm-rockchip830-linux-uclibcgnueabihf-strip
+          $STRIP build/ai-hud
+          $STRIP build-coco/ai-hud
+          echo "=== Production build ==="
           file build/ai-hud
           ls -lh build/ai-hud
+          echo "=== COCO test build ==="
+          file build-coco/ai-hud
+          ls -lh build-coco/ai-hud
 
-      # ---- Upload compiled binary ----
-      - name: Upload binary artifact
+      # ---- Upload compiled binaries ----
+      - name: Upload production binary
         uses: actions/upload-artifact@v4
         with:
           name: ai-hud-rv1106
           path: build/ai-hud
+          retention-days: 30
+
+      - name: Upload COCO test binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: ai-hud-rv1106-coco-test
+          path: build-coco/ai-hud
           retention-days: 30

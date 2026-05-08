@@ -24,9 +24,29 @@
 #include <stdlib.h>
 
 /* --------------------------------------------------------------------------
- * Class labels -- Australian speed signs and speed cameras
+ * Class labels
+ *
+ * When OBJ_CLASS_NUM == 9:  Australian speed signs + speed camera (production)
+ * When OBJ_CLASS_NUM == 80: COCO dataset labels (NPU pipeline testing)
  * -------------------------------------------------------------------------- */
 
+#if OBJ_CLASS_NUM == 80
+static const char *class_names[OBJ_CLASS_NUM] = {
+    "person", "bicycle", "car", "motorbike", "aeroplane", "bus", "train",
+    "truck", "boat", "traffic light", "fire hydrant", "stop sign",
+    "parking meter", "bench", "bird", "cat", "dog", "horse", "sheep",
+    "cow", "elephant", "bear", "zebra", "giraffe", "backpack", "umbrella",
+    "handbag", "tie", "suitcase", "frisbee", "skis", "snowboard",
+    "sports ball", "kite", "baseball bat", "baseball glove", "skateboard",
+    "surfboard", "tennis racket", "bottle", "wine glass", "cup", "fork",
+    "knife", "spoon", "bowl", "banana", "apple", "sandwich", "orange",
+    "broccoli", "carrot", "hot dog", "pizza", "donut", "cake", "chair",
+    "sofa", "pottedplant", "bed", "diningtable", "toilet", "tvmonitor",
+    "laptop", "mouse", "remote", "keyboard", "cell phone", "microwave",
+    "oven", "toaster", "sink", "refrigerator", "book", "clock", "vase",
+    "scissors", "teddy bear", "hair drier", "toothbrush"
+};
+#elif OBJ_CLASS_NUM == 9
 static const char *class_names[OBJ_CLASS_NUM] = {
     "speed_sign_30",
     "speed_sign_40",
@@ -38,11 +58,23 @@ static const char *class_names[OBJ_CLASS_NUM] = {
     "speed_sign_110",
     "speed_camera"
 };
+#else
+/* Generic fallback: numbered class labels */
+static const char *_generic_label(int id) {
+    static char buf[16];
+    snprintf(buf, sizeof(buf), "class_%d", id);
+    return buf;
+}
+#endif
 
 const char *get_class_name(int class_id) {
     if (class_id < 0 || class_id >= OBJ_CLASS_NUM)
         return "unknown";
+#if OBJ_CLASS_NUM == 80 || OBJ_CLASS_NUM == 9
     return class_names[class_id];
+#else
+    return _generic_label(class_id);
+#endif
 }
 
 /* --------------------------------------------------------------------------

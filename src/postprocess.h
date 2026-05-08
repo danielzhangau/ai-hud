@@ -23,7 +23,16 @@ extern "C" {
 
 #define OBJ_NAME_MAX_SIZE   32
 #define OBJ_NUMB_MAX_SIZE   64      /* Max detections per frame          */
-#define OBJ_CLASS_NUM       9       /* Number of detection classes        */
+
+/*
+ * OBJ_CLASS_NUM: number of detection classes.
+ * Override at compile time with -DOBJ_CLASS_NUM=80 for COCO testing.
+ * Default: 9 (Australian speed signs + speed camera)
+ */
+#ifndef OBJ_CLASS_NUM
+#define OBJ_CLASS_NUM       9
+#endif
+
 #define NMS_THRESH          0.45f   /* IoU threshold for NMS             */
 #define BOX_THRESH          0.25f   /* Object confidence threshold       */
 #define PROP_BOX_SIZE       (5 + OBJ_CLASS_NUM)  /* 4 coords + 1 obj + classes */

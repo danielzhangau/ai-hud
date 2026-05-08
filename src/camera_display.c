@@ -6,7 +6,11 @@
  *
  * VPSS dual-channel configuration:
  *   Channel 0: 480x480 NV12 -> VO display output
- *   Channel 1: 320x320 NV12 -> Reserved for NPU inference
+ *   Channel 1: 320x320 NV12 -> NPU inference (when --model is specified)
+ *
+ * Usage:
+ *   ./ai-hud                              Display-only mode
+ *   ./ai-hud --model /root/model/xxx.rknn Display + NPU inference
  *
  * Target: >= 25 FPS
  *
@@ -27,6 +31,8 @@
 #include "rk_mpi_sys.h"
 #include "rk_mpi_mb.h"
 #include "sample_comm_isp.h"
+
+#include "rknn_detect.h"
 
 /* --------------------------------------------------------------------------
  * Constants
@@ -64,6 +70,11 @@
  * -------------------------------------------------------------------------- */
 
 static volatile int g_running = 1;
+
+/* NPU detector context (initialized only when --model is specified) */
+static rknn_detect_ctx_t g_detector;
+static int               g_npu_enabled = 0;
+static const char       *g_model_path  = NULL;
 
 static void signal_handler(int sig) {
     (void)sig;
@@ -476,17 +487,19 @@ static void *fps_monitor_thread(void *arg) {
     printf("[INFO] FPS monitor thread started\n");
 
     while (g_running) {
-        /*
-         * Query VPSS channel 0 frame count to estimate throughput.
-         * In a hardware-bound pipeline (VI->VPSS->VO), the actual FPS
-         * is determined by the VI capture rate and VO refresh rate.
-         *
-         * For detailed FPS tracking, use RK_MPI_VPSS_GetChnFrame() in
-         * a polling loop, but since we use bind mode the frames flow
-         * automatically. We simply print a heartbeat here.
-         */
         sleep(5);
-        if (g_running) {
+        if (!g_running)
+            break;
+
+        if (g_npu_enabled) {
+            float infer_ms, postproc_ms;
+            uint64_t total_frames;
+            rknn_detect_get_perf(&g_detector, &infer_ms, &postproc_ms,
+                                 &total_frames);
+            printf("[INFO] Pipeline running | NPU: infer=%.1fms post=%.1fms "
+                   "frames=%lu\n",
+                   infer_ms, postproc_ms, (unsigned long)total_frames);
+        } else {
             printf("[INFO] Pipeline running... (target: %d FPS)\n", TARGET_FPS);
         }
     }
@@ -499,12 +512,33 @@ static void *fps_monitor_thread(void *arg) {
  * Main
  * -------------------------------------------------------------------------- */
 
-int main(int argc, char *argv[]) {
-    (void)argc;
-    (void)argv;
+static void print_usage(const char *prog) {
+    printf("Usage: %s [options]\n", prog);
+    printf("Options:\n");
+    printf("  -m, --model <path>  RKNN model path (enables NPU inference)\n");
+    printf("  -h, --help          Show this help\n");
+    printf("\n");
+    printf("Without --model, runs display-only (VI -> VPSS -> VO).\n");
+    printf("With --model, starts NPU inference on VPSS CHN1.\n");
+}
 
+int main(int argc, char *argv[]) {
     int ret;
     pthread_t fps_tid;
+
+    /* ---- Parse command-line arguments ---- */
+    for (int i = 1; i < argc; i++) {
+        if ((strcmp(argv[i], "-m") == 0 || strcmp(argv[i], "--model") == 0)
+            && i + 1 < argc) {
+            g_model_path = argv[++i];
+        } else if (strcmp(argv[i], "-h") == 0 ||
+                   strcmp(argv[i], "--help") == 0) {
+            print_usage(argv[0]);
+            return 0;
+        } else {
+            printf("[WARN] Unknown argument: %s\n", argv[i]);
+        }
+    }
 
     printf("============================================\n");
     printf("  AI-HUD Camera Display Pipeline\n");
@@ -512,6 +546,10 @@ int main(int argc, char *argv[]) {
     printf("  Camera:   SC3336 MIPI CSI\n");
     printf("  Display:  DPI LCD %dx%d\n", VO_SCREEN_WIDTH, VO_SCREEN_HEIGHT);
     printf("  Target:   >= %d FPS\n", TARGET_FPS);
+    if (g_model_path)
+        printf("  Model:    %s\n", g_model_path);
+    else
+        printf("  NPU:      disabled (use --model to enable)\n");
     printf("============================================\n");
 
     /* Signal handlers for graceful shutdown */
@@ -560,9 +598,29 @@ int main(int argc, char *argv[]) {
     }
 
     printf("[INFO] Pipeline started: VI -> VPSS -> VO\n");
+
+    /* ---- Step 4: Initialize NPU inference (optional) ---- */
+    if (g_model_path) {
+        ret = rknn_detect_init(&g_detector, g_model_path);
+        if (ret != 0) {
+            printf("[WARN] RKNN init failed, continuing without NPU\n");
+        } else {
+            ret = rknn_detect_start_thread(&g_detector,
+                                           VPSS_GRP_ID, VPSS_CHN_NPU);
+            if (ret != 0) {
+                printf("[WARN] RKNN thread start failed\n");
+                rknn_detect_release(&g_detector);
+            } else {
+                g_npu_enabled = 1;
+                printf("[INFO] NPU inference thread started on VPSS CHN%d\n",
+                       VPSS_CHN_NPU);
+            }
+        }
+    }
+
     printf("[INFO] Press Ctrl+C to stop\n");
 
-    /* ---- Step 4: Start FPS monitor thread ---- */
+    /* ---- Step 5: Start FPS monitor thread ---- */
     int fps_thread_created = 0;
     ret = pthread_create(&fps_tid, NULL, fps_monitor_thread, NULL);
     if (ret != 0) {
@@ -572,7 +630,7 @@ int main(int argc, char *argv[]) {
         fps_thread_created = 1;
     }
 
-    /* ---- Step 5: Main loop -- wait for exit signal ---- */
+    /* ---- Step 6: Main loop -- wait for exit signal ---- */
     /*
      * In bind mode, frames flow automatically through the hardware pipeline:
      *   VI captures -> VPSS scales -> VO displays
@@ -588,7 +646,15 @@ int main(int argc, char *argv[]) {
 
     printf("[INFO] Shutting down pipeline...\n");
 
-    /* ---- Step 6: Cleanup (reverse order) ---- */
+    /* ---- Step 7: Cleanup (reverse order) ---- */
+
+    /* Stop NPU inference thread first (it reads from VPSS CHN1) */
+    if (g_npu_enabled) {
+        rknn_detect_release(&g_detector);
+        g_npu_enabled = 0;
+        printf("[INFO] NPU released\n");
+    }
+
     if (fps_thread_created)
         pthread_join(fps_tid, NULL);
 

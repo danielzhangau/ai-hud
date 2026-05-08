@@ -1,0 +1,115 @@
+name: Model Convert (ONNX -> RKNN)
+
+on:
+  workflow_dispatch:
+    inputs:
+      model_name:
+        description: 'ONNX model name (from airockchip)'
+        required: true
+        default: 'yolov5n'
+        type: choice
+        options:
+          - yolov5n
+          - yolov5s_relu
+      target_platform:
+        description: 'Target NPU platform'
+        required: true
+        default: 'rv1106'
+        type: choice
+        options:
+          - rv1106
+          - rv1103
+
+env:
+  MODEL_NAME: ${{ inputs.model_name }}
+  PLATFORM: ${{ inputs.target_platform }}
+
+jobs:
+  convert:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.10
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      # ---- Install rknn-toolkit2 ----
+      - name: Install rknn-toolkit2
+        run: |
+          pip install --upgrade pip
+          pip install rknn-toolkit2
+          python -c "from rknn.api import RKNN; print('rknn-toolkit2 installed successfully')"
+
+      # ---- Download ONNX model ----
+      - name: Download ONNX model
+        run: |
+          ONNX_URL="https://ftrg.zbox.filez.com/v2/delivery/data/95f00b0fc900458ba134f8b180b3f7a1/examples/yolov5/${MODEL_NAME}.onnx"
+          echo "Downloading ${MODEL_NAME}.onnx ..."
+          curl -L -o "models/${MODEL_NAME}.onnx" "$ONNX_URL"
+          ls -lh "models/${MODEL_NAME}.onnx"
+
+      # ---- Prepare calibration dataset ----
+      # Download a small COCO subset for INT8 quantization calibration
+      - name: Prepare calibration images
+        run: |
+          mkdir -p models/calibration
+          COCO_IMAGES=(
+            "http://images.cocodataset.org/val2017/000000000139.jpg"
+            "http://images.cocodataset.org/val2017/000000000285.jpg"
+            "http://images.cocodataset.org/val2017/000000000632.jpg"
+            "http://images.cocodataset.org/val2017/000000000724.jpg"
+            "http://images.cocodataset.org/val2017/000000000776.jpg"
+            "http://images.cocodataset.org/val2017/000000000785.jpg"
+            "http://images.cocodataset.org/val2017/000000000802.jpg"
+            "http://images.cocodataset.org/val2017/000000000872.jpg"
+            "http://images.cocodataset.org/val2017/000000001000.jpg"
+            "http://images.cocodataset.org/val2017/000000001268.jpg"
+            "http://images.cocodataset.org/val2017/000000001296.jpg"
+            "http://images.cocodataset.org/val2017/000000001353.jpg"
+            "http://images.cocodataset.org/val2017/000000001425.jpg"
+            "http://images.cocodataset.org/val2017/000000001490.jpg"
+            "http://images.cocodataset.org/val2017/000000001503.jpg"
+            "http://images.cocodataset.org/val2017/000000001532.jpg"
+            "http://images.cocodataset.org/val2017/000000001584.jpg"
+            "http://images.cocodataset.org/val2017/000000001675.jpg"
+            "http://images.cocodataset.org/val2017/000000001761.jpg"
+            "http://images.cocodataset.org/val2017/000000001818.jpg"
+          )
+
+          > models/calibration/dataset.txt
+          for url in "${COCO_IMAGES[@]}"; do
+            fname=$(basename "$url")
+            curl -sL -o "models/calibration/${fname}" "$url"
+            echo "$(pwd)/models/calibration/${fname}" >> models/calibration/dataset.txt
+          done
+
+          echo "Calibration images: $(wc -l < models/calibration/dataset.txt)"
+
+      # ---- Convert ONNX to RKNN ----
+      - name: Convert to RKNN
+        run: |
+          RKNN_OUT="models/${MODEL_NAME}_${PLATFORM}.rknn"
+
+          python models/convert_to_rknn.py \
+            --onnx "models/${MODEL_NAME}.onnx" \
+            --output "${RKNN_OUT}" \
+            --dataset "models/calibration/dataset.txt" \
+            --platform "${PLATFORM}" \
+            --verbose
+
+          echo "=== Conversion result ==="
+          ls -lh "${RKNN_OUT}"
+          echo "RKNN_MODEL=${RKNN_OUT}" >> "$GITHUB_ENV"
+
+      # ---- Upload RKNN model artifact ----
+      - name: Upload RKNN model
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.MODEL_NAME }}_${{ env.PLATFORM }}_rknn
+          path: ${{ env.RKNN_MODEL }}
+          retention-days: 90
