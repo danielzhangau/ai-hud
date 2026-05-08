@@ -90,12 +90,36 @@ def nmea_checksum(sentence):
         return False
 
 
+def _nmea_to_decimal(raw_val, direction):
+    """Convert NMEA lat/lon (ddmm.mmmm) to decimal degrees."""
+    if not raw_val or not direction:
+        return None
+    try:
+        raw = float(raw_val)
+    except ValueError:
+        return None
+    degrees = int(raw / 100)
+    minutes = raw - (degrees * 100)
+    decimal = degrees + minutes / 60.0
+    if direction in ("S", "W"):
+        decimal = -decimal
+    return decimal
+
+
 def parse_gprmc(parts):
     if len(parts) < 10:
         return None
     result = {"type": "RMC", "valid": parts[2] == "A"}
     if not result["valid"]:
         return result
+    # Latitude (parts[3]=ddmm.mmmm, parts[4]=N/S)
+    lat = _nmea_to_decimal(parts[3], parts[4])
+    if lat is not None:
+        result["lat"] = lat
+    # Longitude (parts[5]=dddmm.mmmm, parts[6]=E/W)
+    lon = _nmea_to_decimal(parts[5], parts[6])
+    if lon is not None:
+        result["lon"] = lon
     if parts[7]:
         try:
             result["speed_kmh"] = float(parts[7]) * 1.852
@@ -130,6 +154,8 @@ def parse_gpgga(parts):
 class GPSState:
     def __init__(self):
         self.valid = False
+        self.lat = 0.0
+        self.lon = 0.0
         self.speed_kmh = 0.0
         self.heading = 0.0
         self.satellites = 0
@@ -143,6 +169,10 @@ class GPSState:
         if t == "RMC":
             self.valid = parsed.get("valid", False)
             if self.valid:
+                if "lat" in parsed:
+                    self.lat = parsed["lat"]
+                if "lon" in parsed:
+                    self.lon = parsed["lon"]
                 if "speed_kmh" in parsed:
                     self.speed_kmh = parsed["speed_kmh"]
                 if "heading" in parsed:
@@ -1094,7 +1124,7 @@ class HUDState:
     """Track previous frame state for delta rendering."""
     __slots__ = ('speed_int', 'over_limit', 'valid', 'satellites',
                  'fix_quality', 'base_layer', 'speed_limit',
-                 'camera_detected')
+                 'camera_detected', 'camera_dist')
 
     def __init__(self):
         self.speed_int = -1
@@ -1105,6 +1135,7 @@ class HUDState:
         self.base_layer = None
         self.speed_limit = -1
         self.camera_detected = False
+        self.camera_dist = -1  # meters to nearest camera, -1 = none
 
 
 def render_hud(fb, gps, state=None, detect=None):
@@ -1309,6 +1340,29 @@ def main():
     print(f"Framebuffer: {FB_DEV} ({FB_W}x{FB_H})")
     print(f"Default speed limit: {DEFAULT_SPEED_LIMIT} km/h")
     print(f"NPU detection IPC: {NPU_DETECT_FILE}")
+
+    # --- Load offline speed database (optional) ---
+    speed_db = None
+    speed_fusion = None
+    SPEED_DB_ZONES = "/root/data/speed_zones.db"
+    SPEED_DB_CAMERAS = "/root/data/speed_cameras.db"
+    try:
+        from speed_db import SpeedDB, SpeedFusion, fuse_camera_warning
+        zones_ok = os.path.isfile(SPEED_DB_ZONES)
+        cameras_ok = os.path.isfile(SPEED_DB_CAMERAS)
+        if zones_ok or cameras_ok:
+            speed_db = SpeedDB(
+                zones_path=SPEED_DB_ZONES if zones_ok else None,
+                cameras_path=SPEED_DB_CAMERAS if cameras_ok else None,
+            )
+            print(f"Speed DB: {speed_db.zone_count} zones, "
+                  f"{speed_db.camera_count} cameras")
+        else:
+            print("Speed DB: no database files found, using NPU only")
+        speed_fusion = SpeedFusion(default_limit=DEFAULT_SPEED_LIMIT)
+    except ImportError:
+        print("Speed DB: module not available, using NPU only")
+
     print("Press Ctrl+C to stop\n")
 
     fb = Framebuffer(FB_DEV)
@@ -1364,12 +1418,46 @@ def main():
             # Refresh display once per GPS cycle (on RMC)
             if rmc_seen:
                 detect.poll()  # check for NPU detection updates
+
+                # --- Fuse speed DB + NPU results ---
+                if speed_fusion and gps.valid and gps.lat != 0.0:
+                    db_limit = 0
+                    db_cameras = []
+                    if speed_db:
+                        db_result = speed_db.query(
+                            gps.lat, gps.lon, gps.heading)
+                        db_limit = db_result.speed_limit
+                        db_cameras = db_result.cameras
+
+                    # Fuse speed limit via state machine:
+                    # DB is baseline, NPU can only lower (construction),
+                    # requires 3 consecutive high-confidence detections.
+                    detect.speed_limit = speed_fusion.update(
+                        db_limit,
+                        detect.speed_limit,
+                        detect.confidence)
+
+                    # Fuse camera warning: DB proximity OR NPU detection
+                    show_cam, cam_dist, cam_src = fuse_camera_warning(
+                        db_cameras,
+                        detect.camera_detected)
+                    detect.camera_detected = show_cam
+                elif speed_fusion and not gps.valid:
+                    # Lost GPS fix -- reset fusion state
+                    speed_fusion.reset()
+
                 render_hud(fb, gps, hud_state, detect)
                 spd = gps.speed_kmh if gps.valid else 0.0
                 status = "FIX" if gps.valid else "---"
                 lim = detect.speed_limit
-                cam = " CAM" if detect.camera_detected else ""
-                print(f"\r[{status}] {spd:5.1f} km/h | LIM:{lim} | SAT:{gps.satellites}{cam}",
+                cam_info = ""
+                if detect.camera_detected:
+                    cam_info = " CAM"
+                pos = ""
+                if gps.valid and gps.lat != 0.0:
+                    pos = f" ({gps.lat:.4f},{gps.lon:.4f})"
+                print(f"\r[{status}] {spd:5.1f} km/h | LIM:{lim} | "
+                      f"SAT:{gps.satellites}{cam_info}{pos}",
                       end="", flush=True)
 
     except KeyboardInterrupt:

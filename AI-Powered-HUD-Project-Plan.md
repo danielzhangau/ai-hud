@@ -1,7 +1,7 @@
 # AI-Powered HUD - Project Plan
 
-> Vehicle Head-Up Display with AI-Powered Real-time Object Detection & Navigation
-> Hardware: Luckfox Pico Ultra (RV1106G3) | Status: Pre-Development
+> Vehicle Head-Up Display with AI-Powered Real-time Object Detection & Speed Alerts
+> Hardware: Luckfox Pico Ultra (RV1106G3) | Status: Phase 1-4 Complete, Phase 5 In Progress
 
 ---
 
@@ -36,16 +36,18 @@ Build a compact, low-power AI-powered Head-Up Display (HUD) for vehicles that pr
 
 ### 1.2 Core Features
 
-| Feature | Priority | Description |
-|---------|----------|-------------|
-| Camera feed | P0 | Real-time forward-facing video capture via CSI |
-| Display output | P0 | Render HUD UI on RGB LCD screen |
-| Object detection | P1 | YOLOv5/RKNN-based vehicle & pedestrian detection |
-| GPS overlay | P1 | Speed, heading, coordinates display |
-| Lane detection | P2 | Lane departure warning |
-| Distance estimation | P2 | Estimated distance to detected objects |
-| Alert system | P2 | Audio/visual alerts for collision warning |
-| Dash cam recording | P3 | Optional video recording to external storage |
+| Feature | Priority | Status | Description |
+|---------|----------|--------|-------------|
+| Camera feed | P0 | Done | Real-time forward-facing video via MIPI CSI (PiP 120x120) |
+| Display output | P0 | Done | HUD render to 480x480 DPI LCD via framebuffer |
+| Speed limit detection | P0 | Done | AU speed sign recognition via NPU (YOLOv5n) |
+| GPS speed overlay | P0 | Done | Speed, heading, satellite count on HUD |
+| Speed limit database | P0 | Done | Offline GPS-based speed lookup (OSM data, 170K+ zones) |
+| Speed camera alerts | P1 | Done | GPS proximity + NPU detection (1,300+ cameras) |
+| SpeedFusion engine | P1 | Done | DB primary + NPU backup with temporal voting |
+| Buzzer alerts | P2 | TODO | Audio alerts for over-speed / camera warning |
+| Lane detection | P3 | TODO | Lane departure warning |
+| Dash cam recording | P3 | TODO | Optional video recording to external storage |
 
 ### 1.3 Design Principles
 
@@ -129,33 +131,48 @@ Build a compact, low-power AI-powered Head-Up Display (HUD) for vehicles that pr
                     +------------------+
 ```
 
-### 3.2 Software Pipeline
+### 3.2 Software Pipeline (Actual Implementation)
 
 ```
-Camera (CSI) --> VI Module --> VPSS (resize/crop) --> NPU (RKNN inference)
-                                    |                       |
-                                    v                       v
-                              VENC (H.264)          Detection results
-                              (optional record)            |
-                                                           v
-GPS (UART) --> Parser -----> HUD Compositor <--- AI overlay data
-                                    |
-                                    v
-                              DRM/KMS Output --> RGB LCD Panel
+                         ai-hud (C binary)
+                    +---------------------------+
+Camera (SC3336) --> | VI CHN0 (2304x1296)       |
+   MIPI CSI        |   -> VPSS (480x480 NV12)  |---> /dev/fb0 PiP (120x120)
+                   | VI CHN1 (480x480)          |
+                   |   -> NPU thread (RKNN)     |---> /tmp/ai_hud_detect (IPC)
+                   +---------------------------+
+
+                         hud_live.py (Python)
+                    +---------------------------+
+GPS (/dev/ttyS4) -->| NMEA parser (1 Hz)       |
+   9600bps          |   |                       |
+                    |   v                       |
+                    | SpeedFusion state machine |
+                    |   DB (primary) + NPU (backup)
+                    |   |                       |
+                    |   v                       |
+                    | HUD Renderer              |---> /dev/fb0 (480x480 XRGB)
+                    +---------------------------+
+                    |         ^
+                    |         |
+              speed_zones.db  speed_cameras.db
+              (170K records)  (1,363 cameras)
 ```
 
 ### 3.3 Key Software Modules
 
 | Module | Responsibility | Technology |
 |--------|---------------|------------|
-| Video Input (VI) | Camera frame capture | RKMPI VI API |
-| Video Processing (VPSS) | Resize, color convert | RKMPI VPSS API |
-| AI Engine | Object detection inference | RKNN C API + YOLOv5 |
-| GPS Parser | NMEA sentence parsing | Custom C/Python (UART) |
-| HUD Renderer | Compose overlay UI | LVGL or custom DRM framebuffer |
-| Display Output | Push frames to LCD | DRM/KMS (libdrm) |
-| Alert Manager | Collision/lane warnings | PWM buzzer + UI flash |
-| System Manager | Init, watchdog, logging | init.d scripts |
+| Video Input (VI) | Dual-channel camera capture | RKMPI VI (CHN0 main + CHN1 self) |
+| Video Processing (VPSS) | Resize to 480x480 | RKMPI VPSS API |
+| NPU Inference | Speed sign detection | RKNN C API + YOLOv5n INT8 |
+| PiP Renderer | Camera preview overlay | NV12->XRGB mmap /dev/fb0 |
+| HUD IPC | C->Python detection results | Atomic file /tmp/ai_hud_detect |
+| GPS Parser | NMEA GPRMC/GPGGA parsing | Python serial (UART /dev/ttyS4) |
+| Speed Database | Offline speed limit lookup | Grid-indexed binary DB (OSM data) |
+| SpeedFusion | DB + NPU result fusion | Temporal voting state machine |
+| HUD Renderer | HUD UI composition | Python direct framebuffer write |
+| System Manager | Dual-process lifecycle | init.d S99_ai_hud |
 
 ---
 
@@ -391,13 +408,13 @@ while True:
 
 ### 5.4 Phase 1 Checklist
 
-- [ ] Buildroot image flashed and booted successfully
-- [ ] ADB/SSH connection established
-- [ ] Display shows test pattern (correct resolution)
-- [ ] Camera captures frames (V4L2 test)
-- [ ] GPS outputs valid NMEA data
-- [ ] GPIO pins accessible (LED blink test)
-- [ ] System stable under 10-minute stress test
+- [x] Buildroot image flashed and booted successfully
+- [x] ADB/SSH connection established
+- [x] Display shows test pattern (correct resolution)
+- [x] Camera captures frames (V4L2 test)
+- [x] GPS outputs valid NMEA data (ttyS4, 9600bps)
+- [x] GPIO pins accessible (LED blink test)
+- [x] System stable under 10-minute stress test
 
 ---
 
@@ -491,10 +508,10 @@ scp hud_preview root@172.32.0.93:/root/
 
 ### 6.5 Phase 2 Deliverables
 
-- [ ] Camera preview displayed on RGB LCD in real-time
-- [ ] Frame rate >= 25 FPS at display native resolution
-- [ ] No visible tearing or artifacts
-- [ ] Latency camera-to-display < 80ms
+- [x] Camera preview displayed on RGB LCD (PiP 120x120 bottom-right)
+- [x] Frame rate >= 25 FPS at display native resolution
+- [x] No visible tearing or artifacts (software NV12->XRGB via mmap)
+- [x] Latency camera-to-display < 80ms
 
 ---
 
@@ -538,11 +555,12 @@ Main Render Thread:                 v
 
 ### 7.4 Phase 3 Deliverables
 
-- [ ] GPS module outputs valid fix data
-- [ ] Speed displayed on HUD in km/h (large, glanceable font)
-- [ ] Satellite count / fix status indicator
-- [ ] Heading indicator (optional compass)
-- [ ] GPS data update rate >= 1Hz
+- [x] GPS module outputs valid fix data (ttyS4 @ 9600bps)
+- [x] Speed displayed on HUD in km/h (large, glanceable font)
+- [x] Satellite count / fix status indicator
+- [x] Heading indicator
+- [x] GPS data update rate >= 1Hz
+- [x] Lat/lon parsing for speed database lookup
 
 ---
 
@@ -552,14 +570,17 @@ Main Render Thread:                 v
 
 ### 8.1 Model Selection
 
-| Model | Task | Input Size | Est. FPS (RV1106) |
-|-------|------|-----------|-------------------|
-| YOLOv5s (RKNN) | Vehicle/pedestrian detection | 640x640 | ~8-12 FPS |
-| YOLOv5n (RKNN) | Lightweight detection | 320x320 | ~15-20 FPS |
-| Retinaface (RKNN) | Face detection (optional) | 320x320 | ~20 FPS |
-| Custom lane model | Lane detection | 320x160 | ~25 FPS |
+| Model | Task | Input Size | FPS (RV1106) | Status |
+|-------|------|-----------|-------------|--------|
+| YOLOv5n (COCO 80-class) | General detection | 640x640 | ~12 FPS | Test done |
+| YOLOv5n (AU 9-class) | AU speed sign + camera | 320x320 | ~15-20 FPS | **Production** |
 
-**Recommended**: Start with YOLOv5n at 320x320 for best FPS/accuracy tradeoff.
+**Production model**: Custom YOLOv5n trained on Australian speed sign dataset (9 classes: speed_10/20/30/40/50/60/70/80 + speed_camera). INT8 quantized for RKNPU.
+
+**Performance** (measured on device):
+- NPU inference: ~61ms (hardware fixed)
+- Postprocess: ~20ms (optimized from 61ms via static buffers + INT8 class search)
+- PiP render: ~1ms (120x120 NV12->XRGB point-sample)
 
 ### 8.2 Model Conversion Pipeline
 
@@ -628,11 +649,91 @@ This allows display and AI to run at different resolutions simultaneously.
 
 ### 8.5 Phase 4 Deliverables
 
-- [ ] RKNN model converted and loaded on device
-- [ ] Object detection running at >= 10 FPS
-- [ ] Bounding boxes rendered on HUD overlay
-- [ ] Detection classes: vehicle, pedestrian, bicycle (minimum)
-- [ ] CPU usage < 80% during inference (offloaded to NPU)
+- [x] RKNN model converted and loaded on device (INT8 quantized)
+- [x] Object detection running at >= 10 FPS (NPU ~61ms + post ~20ms)
+- [x] Detection results passed to HUD via IPC file
+- [x] Detection classes: 8 speed signs + speed camera (AU-specific)
+- [x] CPU usage < 80% during inference (offloaded to NPU)
+- [x] Offline speed database integrated (170K zones, 1,363 cameras)
+- [x] SpeedFusion engine: DB primary + NPU backup with temporal voting
+
+---
+
+## Speed Database Architecture
+
+> Offline GPS-based speed limit and camera warning system.
+> DB is the PRIMARY source (stable); NPU detection is BACKUP (for temporary changes).
+
+### Data Sources
+
+| Source | Coverage | Records | License |
+|--------|----------|---------|---------|
+| OpenStreetMap Overpass API | 7 AU metro areas (16 tiles) | 171,033 speed zones | ODbL |
+| OpenStreetMap Overpass API | All Australia | 1,363 speed cameras | ODbL |
+| Government open data (NSW/VIC/QLD/WA) | Hardcoded known cameras | 13 cameras | CC BY 4.0 |
+
+**Cities covered**: Sydney (4 tiles), Melbourne (4 tiles), Brisbane (4 tiles), Perth, Adelaide, Canberra, Gold Coast.
+
+### Binary Database Format
+
+Both databases share the same compact binary layout (16 bytes per record):
+
+```
+Header (16 bytes):
+  magic:     4B  (b'SZON' / b'SCAM')
+  version:   u16
+  count:     u32
+  rec_size:  u16
+  flags:     u32  (reserved)
+
+Record (16 bytes, sorted by grid_key):
+  lat_e6:    i32  (latitude * 1e6)
+  lon_e6:    i32  (longitude * 1e6)
+  speed:     u8   (km/h)
+  rec_type:  u8   (road/camera type)
+  bearing:   u16  (degrees, 0xFFFF = bidirectional)
+  grid_key:  u32  (spatial bucket)
+```
+
+### Spatial Indexing
+
+- Grid resolution: 0.005 degrees (~550m lat, ~450m lon at -33 deg)
+- Query: 9-cell neighborhood search (current + 8 neighbors)
+- Lookup time: <1ms on Cortex-A7 @ 1.2GHz
+- Memory: ~2.7 MB zones + ~21 KB cameras (fits in 256MB RAM)
+
+### SpeedFusion State Machine
+
+Prevents HUD speed limit flickering by requiring temporal consistency from NPU:
+
+```
+           +----------+    NPU votes >= 3     +----------+
+           |          |    conf >= 0.60        |          |
+  GPS ---->|  DB mode |  + candidate < DB      | NPU mode |
+  cycle    | (primary)|----------------------->| (override|
+           |          |                        |          |
+           +----------+    timeout 30s OR      +----------+
+                ^          new road segment         |
+                |          (DB limit changed)       |
+                +-----------------------------------+
+```
+
+**Rules**:
+1. DB is always the trusted baseline
+2. NPU can only LOWER the limit (never raise -- safety first)
+3. NPU needs >= 3 consecutive detections with confidence >= 0.60
+4. NPU override expires after 30 seconds without re-confirmation
+5. Entering a new road segment (DB limit changes) resets NPU state
+6. When no DB data available, NPU confidence threshold relaxes to 0.55
+
+### Preparation Tool
+
+`tools/prepare_speed_db.py` -- run on PC to download OSM data and generate binary DBs:
+```bash
+python tools/prepare_speed_db.py
+# Output: data/speed_zones.db, data/speed_cameras.db
+# Deploy: adb push data/*.db /root/data/
+```
 
 ---
 
@@ -765,28 +866,31 @@ Power considerations:
 
 ```
 ai-hud/
-  CMakeLists.txt
+  CMakeLists.txt              # Cross-compile for arm-rockchip830
+  .github/workflows/
+    app-build.yml             # CI: Docker cross-compile (~18s)
   src/
-    main.c                  # Application entry, thread orchestration
-    vi_module.c/.h          # Camera input (RKMPI VI)
-    vpss_module.c/.h        # Video processing (resize, color convert)
-    display_module.c/.h     # DRM/KMS display output
-    rknn_module.c/.h        # NPU inference wrapper
-    gps_module.c/.h         # UART GPS parser
-    hud_renderer.c/.h       # UI composition (LVGL or custom)
-    alert_manager.c/.h      # Warning logic
-    utils.c/.h              # Logging, timing, shared data structures
-  model/
-    yolov5n.rknn            # Pre-converted RKNN model
-  config/
-    hud_config.ini          # Runtime configuration (thresholds, UI params)
+    camera_display.c          # VI->VPSS->VO/PiP, pip_render_thread
+    rknn_detect.c/.h          # RKNN inference thread (VI CHN1)
+    postprocess.c/.h          # YOLOv5 INT8 decode + NMS (optimized)
+    hud_ipc.h                 # C->Python IPC atomic file protocol
+    hud_live.py               # Python HUD: GPS, speed DB, framebuffer render
+    speed_db.py               # Offline speed limit + camera DB with spatial lookup
+  data/
+    speed_zones.db            # Binary DB: 171K speed zone records (2.7 MB)
+    speed_cameras.db          # Binary DB: 1,363 camera locations (21 KB)
+  tools/
+    prepare_speed_db.py       # PC-side: download OSM data, generate binary DBs
+  training/
+    prepare_dataset.py        # AU speed sign dataset preparation
+    train.sh                  # YOLOv5n training script
+    train_colab.ipynb         # Google Colab training notebook
+    au_speed_signs.yaml       # Dataset config (9 classes)
+    README.md                 # Training instructions
   scripts/
-    S99_ai_hud              # Auto-start init.d script
-    build.sh                # Cross-compile helper
-    deploy.sh               # SCP deploy to board
-  docs/
-    wiring_diagram.png
-    enclosure_design.stl
+    S99_ai_hud                # init.d dual-process manager
+  model/
+    au_speed_signs_rv1106.rknn  # Custom 9-class AU model (on device)
 ```
 
 ### 11.2 Build System (CMakeLists.txt skeleton)
@@ -968,6 +1072,6 @@ AI-Powered HUD (Main Page)
 
 ---
 
-*Document generated: 2026-05-07*
+*Document updated: 2026-05-08*
 *Hardware platform: Luckfox Pico Ultra RV1106G3*
-*Target: Vehicle AI HUD with real-time object detection*
+*Target: Vehicle AI HUD with speed limit alerts (AU market)*
