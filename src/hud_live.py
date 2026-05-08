@@ -1043,6 +1043,13 @@ SIGN_R = 52
 SIGN_CX = FB_W - 65
 SIGN_CY = FB_H // 2 + 10
 
+# PiP camera preview area (must match C binary PIP_* constants)
+PIP_SIZE = 120
+PIP_MARGIN = 10
+PIP_X = FB_W - PIP_MARGIN - PIP_SIZE   # 350
+PIP_Y = FB_H - PIP_MARGIN - PIP_SIZE   # 350
+PIP_BORDER = (80, 85, 100)             # subtle gray border
+
 
 def _build_base_layer(fb, speed_limit=DEFAULT_SPEED_LIMIT):
     """Pre-render the static background layer: bg + arc track + limit sign.
@@ -1069,8 +1076,16 @@ def _build_base_layer(fb, speed_limit=DEFAULT_SPEED_LIMIT):
     limit_ty = SIGN_CY - limit_th // 2
     fb.draw_text(limit_str, limit_tx, limit_ty, COL_LIMIT_TEXT, limit_scale)
 
-    # Thin separator line above satellite info
-    fb.fill_rect(20, FB_H - 55, FB_W - 40, 1, COL_DIM)
+    # Thin separator line above satellite info (shortened to avoid PiP area)
+    fb.fill_rect(20, FB_H - 55, PIP_X - 30, 1, COL_DIM)
+
+    # PiP camera border (1px frame around VO overlay area)
+    bx, by = PIP_X - 1, PIP_Y - 1
+    bw, bh = PIP_SIZE + 2, PIP_SIZE + 2
+    fb.fill_rect(bx, by, bw, 1, PIP_BORDER)           # top
+    fb.fill_rect(bx, by + bh - 1, bw, 1, PIP_BORDER)  # bottom
+    fb.fill_rect(bx, by, 1, bh, PIP_BORDER)            # left
+    fb.fill_rect(bx + bw - 1, by, 1, bh, PIP_BORDER)  # right
 
     return bytearray(fb.buf)
 
@@ -1210,13 +1225,13 @@ def render_hud(fb, gps, state=None, detect=None):
         hint_y = speed_y - GLYPH_H * hint_scale - 8
         fb.draw_text(hint_str, hint_x, hint_y, COL_DIM, hint_scale)
 
-    # --- Alert bar (bottom, context-sensitive) ---
+    # --- Alert bar (bottom, shortened to avoid PiP overlap) ---
     show_alert = over_limit or camera
     if show_alert:
         bar_h = 44
         bar_y = FB_H - bar_h - 68
         bar_x = 24
-        bar_w = FB_W - 48
+        bar_w = PIP_X - bar_x - 10  # stop before PiP area
 
         # Choose alert color and text based on situation
         if camera and over_limit:

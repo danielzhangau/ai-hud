@@ -75,6 +75,19 @@
 #define VO_SCREEN_WIDTH     480
 #define VO_SCREEN_HEIGHT    480
 
+/*
+ * PiP (Picture-in-Picture) camera preview.
+ * When enabled, the camera feed is displayed in a small window at the
+ * bottom-right corner instead of full-screen.  The rest of the display
+ * shows through the framebuffer (HUD from hud_live.py).
+ *
+ * Coordinates must match the PIP_* constants in hud_live.py.
+ */
+#define PIP_SIZE            120
+#define PIP_MARGIN          10
+#define PIP_X               (VO_SCREEN_WIDTH  - PIP_MARGIN - PIP_SIZE)  /* 350 */
+#define PIP_Y               (VO_SCREEN_HEIGHT - PIP_MARGIN - PIP_SIZE)  /* 350 */
+
 /* Pipeline */
 #define TARGET_FPS          25
 
@@ -88,6 +101,9 @@ static volatile int g_running = 1;
 static rknn_detect_ctx_t g_detector;
 static int               g_npu_enabled = 0;
 static const char       *g_model_path  = NULL;
+
+/* PiP mode: camera in small corner window, framebuffer HUD visible */
+static int               g_pip_mode    = 0;
 
 static void signal_handler(int sig) {
     (void)sig;
@@ -369,12 +385,24 @@ static int vo_init(void) {
     /* ---- VO layer (GRAPHIC mode + RGA splice, matching official demo) ---- */
     VO_VIDEO_LAYER_ATTR_S layer_attr;
     memset(&layer_attr, 0, sizeof(layer_attr));
-    layer_attr.stDispRect.s32X      = 0;
-    layer_attr.stDispRect.s32Y      = 0;
-    layer_attr.stDispRect.u32Width  = VO_SCREEN_WIDTH;
-    layer_attr.stDispRect.u32Height = VO_SCREEN_HEIGHT;
-    layer_attr.stImageSize.u32Width  = VO_SCREEN_WIDTH;
-    layer_attr.stImageSize.u32Height = VO_SCREEN_HEIGHT;
+
+    if (g_pip_mode) {
+        /* PiP: small camera window at bottom-right corner */
+        layer_attr.stDispRect.s32X      = PIP_X;
+        layer_attr.stDispRect.s32Y      = PIP_Y;
+        layer_attr.stDispRect.u32Width  = PIP_SIZE;
+        layer_attr.stDispRect.u32Height = PIP_SIZE;
+        layer_attr.stImageSize.u32Width  = PIP_SIZE;
+        layer_attr.stImageSize.u32Height = PIP_SIZE;
+    } else {
+        /* Full-screen camera preview */
+        layer_attr.stDispRect.s32X      = 0;
+        layer_attr.stDispRect.s32Y      = 0;
+        layer_attr.stDispRect.u32Width  = VO_SCREEN_WIDTH;
+        layer_attr.stDispRect.u32Height = VO_SCREEN_HEIGHT;
+        layer_attr.stImageSize.u32Width  = VO_SCREEN_WIDTH;
+        layer_attr.stImageSize.u32Height = VO_SCREEN_HEIGHT;
+    }
     layer_attr.enPixFormat           = RK_FMT_RGB888;
     layer_attr.enCompressMode        = COMPRESS_AFBC_16x16;
     layer_attr.u32DispFrmRt          = TARGET_FPS;
@@ -394,13 +422,13 @@ static int vo_init(void) {
         return ret;
     }
 
-    /* ---- VO channel ---- */
+    /* ---- VO channel (fills the layer area) ---- */
     VO_CHN_ATTR_S chn_attr;
     memset(&chn_attr, 0, sizeof(chn_attr));
     chn_attr.stRect.s32X      = 0;
     chn_attr.stRect.s32Y      = 0;
-    chn_attr.stRect.u32Width  = VO_SCREEN_WIDTH;
-    chn_attr.stRect.u32Height = VO_SCREEN_HEIGHT;
+    chn_attr.stRect.u32Width  = g_pip_mode ? PIP_SIZE : VO_SCREEN_WIDTH;
+    chn_attr.stRect.u32Height = g_pip_mode ? PIP_SIZE : VO_SCREEN_HEIGHT;
     chn_attr.u32Priority      = 0;
     chn_attr.u32FgAlpha       = 255;
     chn_attr.u32BgAlpha       = 0;
@@ -417,9 +445,16 @@ static int vo_init(void) {
         return ret;
     }
 
-    printf("[INFO] VO initialized: dev=%d, layer=%d, chn=%d, %dx%d @ %dfps\n",
-           VO_DEV_ID, VO_LAYER_ID, VO_CHN_ID,
-           VO_SCREEN_WIDTH, VO_SCREEN_HEIGHT, TARGET_FPS);
+    if (g_pip_mode) {
+        printf("[INFO] VO initialized (PiP): dev=%d, layer=%d, chn=%d, "
+               "%dx%d at (%d,%d) @ %dfps\n",
+               VO_DEV_ID, VO_LAYER_ID, VO_CHN_ID,
+               PIP_SIZE, PIP_SIZE, PIP_X, PIP_Y, TARGET_FPS);
+    } else {
+        printf("[INFO] VO initialized: dev=%d, layer=%d, chn=%d, %dx%d @ %dfps\n",
+               VO_DEV_ID, VO_LAYER_ID, VO_CHN_ID,
+               VO_SCREEN_WIDTH, VO_SCREEN_HEIGHT, TARGET_FPS);
+    }
     return 0;
 }
 
@@ -531,10 +566,13 @@ static void print_usage(const char *prog) {
     printf("Usage: %s [options]\n", prog);
     printf("Options:\n");
     printf("  -m, --model <path>  RKNN model path (enables NPU inference)\n");
+    printf("      --fullcam       Full-screen camera (disable PiP mode)\n");
     printf("  -h, --help          Show this help\n");
     printf("\n");
-    printf("Without --model, runs display-only (VI -> VPSS -> VO).\n");
-    printf("With --model, starts NPU inference on VI CHN1 (selfpath).\n");
+    printf("Without --model: full-screen camera preview.\n");
+    printf("With --model:    PiP camera (%dx%d) + NPU inference.\n",
+           PIP_SIZE, PIP_SIZE);
+    printf("With --fullcam:  force full-screen camera (even with --model).\n");
 }
 
 int main(int argc, char *argv[]) {
@@ -542,10 +580,13 @@ int main(int argc, char *argv[]) {
     pthread_t fps_tid;
 
     /* ---- Parse command-line arguments ---- */
+    int force_fullcam = 0;
     for (int i = 1; i < argc; i++) {
         if ((strcmp(argv[i], "-m") == 0 || strcmp(argv[i], "--model") == 0)
             && i + 1 < argc) {
             g_model_path = argv[++i];
+        } else if (strcmp(argv[i], "--fullcam") == 0) {
+            force_fullcam = 1;
         } else if (strcmp(argv[i], "-h") == 0 ||
                    strcmp(argv[i], "--help") == 0) {
             print_usage(argv[0]);
@@ -554,6 +595,9 @@ int main(int argc, char *argv[]) {
             printf("[WARN] Unknown argument: %s\n", argv[i]);
         }
     }
+
+    /* PiP mode: enabled by default when model is specified */
+    g_pip_mode = (g_model_path != NULL) && !force_fullcam;
 
     printf("============================================\n");
     printf("  AI-HUD Camera Display Pipeline\n");
@@ -565,6 +609,7 @@ int main(int argc, char *argv[]) {
         printf("  Model:    %s\n", g_model_path);
     else
         printf("  NPU:      disabled (use --model to enable)\n");
+    printf("  Display:  %s\n", g_pip_mode ? "PiP (120x120 bottom-right)" : "full-screen camera");
     printf("============================================\n");
 
     /* Signal handlers for graceful shutdown */
