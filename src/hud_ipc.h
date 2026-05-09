@@ -32,10 +32,18 @@
 /* Python -> C: NPU enable/disable toggle (content: "1" or "0") */
 #define HUD_IPC_NPU_ENABLE_FILE "/tmp/ai_hud_npu_enable"
 
-/* Speed limit classes (matching postprocess.h CLASS_LABELS) */
+/* Speed limit classes (matching postprocess.h class order) */
+#ifdef HUD_REGION_CN
+/* CN: 8 classes, no speed camera */
+static const int SIGN_SPEEDS[] = {20, 30, 40, 50, 60, 80, 100, 120};
+#define SIGN_SPEED_COUNT  8
+#define CLASS_SPEED_CAMERA -1  /* CN model has no speed camera class */
+#else
+/* AU (default): 8 speed signs + 1 speed camera */
 static const int SIGN_SPEEDS[] = {30, 40, 50, 60, 70, 80, 100, 110};
 #define SIGN_SPEED_COUNT  8
-#define CLASS_SPEED_CAMERA 8  /* class_id for speed camera */
+#define CLASS_SPEED_CAMERA 8   /* class_id for speed camera */
+#endif
 
 /*
  * Write detection result to IPC file (atomic via rename).

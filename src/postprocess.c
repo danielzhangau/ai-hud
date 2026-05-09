@@ -26,7 +26,8 @@
 /* --------------------------------------------------------------------------
  * Class labels
  *
- * When OBJ_CLASS_NUM == 9:  Australian speed signs + speed camera (production)
+ * When OBJ_CLASS_NUM == 9:  Australian speed signs + speed camera (AU production)
+ * When OBJ_CLASS_NUM == 8:  Chinese speed signs (CN production)
  * When OBJ_CLASS_NUM == 80: COCO dataset labels (NPU pipeline testing)
  * -------------------------------------------------------------------------- */
 
@@ -58,6 +59,17 @@ static const char *class_names[OBJ_CLASS_NUM] = {
     "speed_sign_110",
     "speed_camera"
 };
+#elif OBJ_CLASS_NUM == 8
+static const char *class_names[OBJ_CLASS_NUM] = {
+    "speed_sign_20",
+    "speed_sign_30",
+    "speed_sign_40",
+    "speed_sign_50",
+    "speed_sign_60",
+    "speed_sign_80",
+    "speed_sign_100",
+    "speed_sign_120"
+};
 #else
 /* Generic fallback: numbered class labels */
 static const char *_generic_label(int id) {
@@ -70,7 +82,7 @@ static const char *_generic_label(int id) {
 const char *get_class_name(int class_id) {
     if (class_id < 0 || class_id >= OBJ_CLASS_NUM)
         return "unknown";
-#if OBJ_CLASS_NUM == 80 || OBJ_CLASS_NUM == 9
+#if OBJ_CLASS_NUM == 80 || OBJ_CLASS_NUM == 9 || OBJ_CLASS_NUM == 8
     return class_names[class_id];
 #else
     return _generic_label(class_id);

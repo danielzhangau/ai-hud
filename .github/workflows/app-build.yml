@@ -49,6 +49,17 @@ jobs:
             -DRKMPI_DIR=/opt/rkmpi
           make -j$(nproc) VERBOSE=1
 
+      # ---- Build CN variant (8-class China speed signs) ----
+      - name: Build (CN region)
+        run: |
+          mkdir -p build-cn && cd build-cn
+          cmake .. \
+            -DCMAKE_TOOLCHAIN_FILE=../cmake/rv1106-toolchain.cmake \
+            -DTOOLCHAIN_DIR=/opt/toolchain \
+            -DRKMPI_DIR=/opt/rkmpi \
+            -DREGION_CN=ON
+          make -j$(nproc)
+
       # ---- Build COCO test variant (80-class for NPU pipeline testing) ----
       - name: Build (COCO test)
         run: |
@@ -65,10 +76,14 @@ jobs:
         run: |
           STRIP=/opt/toolchain/bin/arm-rockchip830-linux-uclibcgnueabihf-strip
           $STRIP build/ai-hud
+          $STRIP build-cn/ai-hud
           $STRIP build-coco/ai-hud
-          echo "=== Production build ==="
+          echo "=== Production build (AU) ==="
           file build/ai-hud
           ls -lh build/ai-hud
+          echo "=== CN region build ==="
+          file build-cn/ai-hud
+          ls -lh build-cn/ai-hud
           echo "=== COCO test build ==="
           file build-coco/ai-hud
           ls -lh build-coco/ai-hud
@@ -79,6 +94,13 @@ jobs:
         with:
           name: ai-hud-rv1106
           path: build/ai-hud
+          retention-days: 30
+
+      - name: Upload CN region binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: ai-hud-rv1106-cn
+          path: build-cn/ai-hud
           retention-days: 30
 
       - name: Upload COCO test binary

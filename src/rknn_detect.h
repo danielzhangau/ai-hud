@@ -32,7 +32,11 @@ extern "C" {
  * -------------------------------------------------------------------------- */
 
 /* Default model path on the board filesystem */
-#define RKNN_MODEL_PATH_DEFAULT "/root/model/yolov5n_320.rknn"
+#ifdef HUD_REGION_CN
+#define RKNN_MODEL_PATH_DEFAULT "/root/model/cn_speed_signs_rv1106.rknn"
+#else
+#define RKNN_MODEL_PATH_DEFAULT "/root/model/au_speed_signs_rv1106.rknn"
+#endif
 
 /* Inference thread frame grab timeout (milliseconds) */
 #define RKNN_FRAME_TIMEOUT_MS   200
