@@ -1,0 +1,26 @@
+# YOLOv5 Dataset Config -- Chinese Speed Limit Signs (TT100K)
+# 8 classes for Luckfox Pico Ultra (RV1106G3) deployment
+#
+# Data source: Tsinghua-Tencent 100K (TT100K)
+# http://cg.cs.tsinghua.edu.cn/traffic-sign/
+#
+# Usage: python train.py --data cn_speed_signs.yaml --cfg yolov5n.yaml --img 480
+
+# Dataset paths (set by cn_tt100k_prepare.py or override in Colab)
+train: ../cn_speed_dataset/train/images
+val: ../cn_speed_dataset/val/images
+
+# Number of classes
+nc: 8
+
+# Class names -- must match postprocess.c class_names[] order
+# TT100K source labels: pl20, pl30, pl40, pl50, pl60, pl80, pl100, pl120
+names:
+  0: speed_sign_20
+  1: speed_sign_30
+  2: speed_sign_40
+  3: speed_sign_50
+  4: speed_sign_60
+  5: speed_sign_80
+  6: speed_sign_100
+  7: speed_sign_120
