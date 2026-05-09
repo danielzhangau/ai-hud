@@ -47,6 +47,10 @@ NPU_POLL_INTERVAL = 0.5  # seconds between file reads
 SPEED_IPC_FILE = "/tmp/ai_hud_speed"
 SPEED_IPC_TMP = "/tmp/ai_hud_speed.tmp"
 
+# NPU enable/disable IPC file -- Python writes, C inference thread reads
+NPU_ENABLE_FILE = "/tmp/ai_hud_npu_enable"
+NPU_ENABLE_TMP = "/tmp/ai_hud_npu_enable.tmp"
+
 # ---------------------------------------------------------------------------
 # Region system -- GPS auto-detect for DB switching (UI always English)
 # ---------------------------------------------------------------------------
@@ -284,6 +288,20 @@ def write_speed_ipc(speed_kmh):
         pass  # non-critical, C side falls back to default rate
 
 
+def write_npu_enable_ipc(enabled):
+    """Write NPU enable/disable toggle to IPC file for C inference thread.
+
+    When disabled, the C inference thread skips NPU inference entirely,
+    falling back to pure database-driven speed limits.
+    """
+    try:
+        with open(NPU_ENABLE_TMP, "w") as f:
+            f.write("1\n" if enabled else "0\n")
+        os.rename(NPU_ENABLE_TMP, NPU_ENABLE_FILE)
+    except OSError:
+        pass
+
+
 class GPSState:
     def __init__(self):
         self.valid = False
@@ -340,9 +358,12 @@ class DetectionState:
         self.confidence = 0.0
         self.last_poll = 0
         self._last_mtime = 0
+        self.npu_enabled = True  # user toggle for live detection
 
     def poll(self):
         """Read detection file if changed. Called from main loop."""
+        if not self.npu_enabled:
+            return  # NPU disabled, skip polling
         now = time.time()
         if now - self.last_poll < NPU_POLL_INTERVAL:
             return
@@ -374,6 +395,16 @@ class DetectionState:
                             pass
         except (OSError, IOError):
             pass  # file doesn't exist yet -- NPU not running
+
+    def set_npu_enabled(self, enabled):
+        """Toggle NPU inference on/off. Writes IPC file for C thread."""
+        self.npu_enabled = bool(enabled)
+        write_npu_enable_ipc(self.npu_enabled)
+        if not self.npu_enabled:
+            # Clear stale NPU results when disabled
+            self.speed_limit = DEFAULT_SPEED_LIMIT
+            self.camera_detected = False
+            self.confidence = 0.0
 
     @property
     def active(self):
@@ -599,29 +630,29 @@ _GLYPHS = {
         "................",
     ],
     '8': [
-        "................",
-        "..#####.........",
-        ".#######........",
-        "###...###.......",
-        "##.....##.......",
-        "##.....##.......",
-        "##.....##.......",
-        "###...###.......",
-        ".#######........",
-        "..#####.........",
-        ".#######........",
-        "###...###.......",
-        "##.....##.......",
-        "##.....##.......",
-        "##.....##.......",
-        "##.....##.......",
-        "##.....##.......",
-        "##.....##.......",
-        "###...###.......",
-        ".#######........",
-        "..#####.........",
-        "................",
-        "................",
+        "..####..........",
+        ".######.........",
+        "###..###........",
+        "##....##........",
+        "##....##........",
+        "##....##........",
+        "##....##........",
+        "###..###........",
+        ".######.........",
+        "..####..........",
+        ".######.........",
+        "###..###........",
+        "##....##........",
+        "##....##........",
+        "##....##........",
+        "##....##........",
+        "##....##........",
+        "##....##........",
+        "##....##........",
+        "##....##........",
+        "###..###........",
+        ".######.........",
+        "..####..........",
         "................",
     ],
     '9': [
@@ -1517,6 +1548,7 @@ def main():
     gps_fd = open_serial(device, baudrate)
     gps = GPSState()
     detect = DetectionState()
+    write_npu_enable_ipc(True)  # ensure C thread starts with NPU enabled
     nmea_buf = b""
     hud_state = HUDState()
 

@@ -434,8 +434,28 @@ static void *inference_thread_func(void *arg) {
     int consecutive_errors = 0;
     detect_result_group_t local_result;
     float last_logged_speed = -999.0f;
+    int last_npu_enabled = 1;
 
     while (!ctx->thread_should_stop) {
+        /*
+         * NPU enable/disable toggle: skip inference when disabled.
+         * The user can toggle this via the settings UI (or IPC file)
+         * to fall back to pure database-driven speed limits.
+         */
+        int npu_enabled = hud_ipc_read_npu_enabled();
+        if (!npu_enabled) {
+            if (last_npu_enabled) {
+                printf("[INFO] NPU inference disabled by user\n");
+                last_npu_enabled = 0;
+            }
+            usleep(500 * 1000);  /* 500ms idle poll */
+            continue;
+        }
+        if (!last_npu_enabled) {
+            printf("[INFO] NPU inference re-enabled by user\n");
+            last_npu_enabled = 1;
+        }
+
         /*
          * Grab a frame (NV12) from the configured source.
          *

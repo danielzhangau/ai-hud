@@ -29,6 +29,9 @@
 /* Python -> C: vehicle speed for adaptive inference rate */
 #define HUD_IPC_SPEED_FILE "/tmp/ai_hud_speed"
 
+/* Python -> C: NPU enable/disable toggle (content: "1" or "0") */
+#define HUD_IPC_NPU_ENABLE_FILE "/tmp/ai_hud_npu_enable"
+
 /* Speed limit classes (matching postprocess.h CLASS_LABELS) */
 static const int SIGN_SPEEDS[] = {30, 40, 50, 60, 70, 80, 100, 110};
 #define SIGN_SPEED_COUNT  8
@@ -160,6 +163,27 @@ static inline int hud_ipc_adaptive_sleep_ms(float speed_kmh, float infer_ms)
         sleep_ms = 0;
 
     return sleep_ms;
+}
+
+/* ---------------------------------------------------------------------------
+ * Python -> C: Read NPU enable/disable toggle
+ * ---------------------------------------------------------------------------
+ *
+ * The Python HUD (or future settings UI) writes "1" or "0" to
+ * HUD_IPC_NPU_ENABLE_FILE to toggle live NPU inference on/off.
+ *
+ * Returns 1 (enabled) or 0 (disabled). Defaults to 1 if file is missing.
+ */
+static inline int hud_ipc_read_npu_enabled(void)
+{
+    FILE *fp = fopen(HUD_IPC_NPU_ENABLE_FILE, "r");
+    if (!fp)
+        return 1;  /* Default: enabled */
+    int val = 1;
+    if (fscanf(fp, "%d", &val) != 1)
+        val = 1;
+    fclose(fp);
+    return val != 0;
 }
 
 #endif /* HUD_IPC_H */
