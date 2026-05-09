@@ -39,11 +39,130 @@ COL_LIMIT_BG = (252, 252, 255)
 COL_LIMIT_RING = (215, 40, 40)
 COL_LIMIT_TEXT = (20, 20, 25)
 
-DEFAULT_SPEED_LIMIT = 100  # fallback limit when no sign detected (km/h)
-
 # NPU detection IPC file -- C inference process writes results here
 NPU_DETECT_FILE = "/tmp/ai_hud_detect"
 NPU_POLL_INTERVAL = 0.5  # seconds between file reads
+
+# Speed IPC file -- Python writes speed for C adaptive inference rate
+SPEED_IPC_FILE = "/tmp/ai_hud_speed"
+SPEED_IPC_TMP = "/tmp/ai_hud_speed.tmp"
+
+# ---------------------------------------------------------------------------
+# Region system -- GPS auto-detect for DB switching (UI always English)
+# ---------------------------------------------------------------------------
+
+# Per-region database paths and defaults
+_REGION_DATA = {
+    "au": {
+        "default_limit": 100,
+        "zones_db": "/root/data/speed_zones.db",
+        "cameras_db": "/root/data/speed_cameras.db",
+    },
+    "cn": {
+        "default_limit": 120,
+        "zones_db": "/root/data/speed_zones_cn.db",
+        "cameras_db": "/root/data/speed_cameras_cn.db",
+    },
+}
+
+# Geographic bounding boxes for auto-detection (WGS-84)
+_REGION_BOUNDS = {
+    "cn": {"lat": (18.0, 54.0), "lon": (73.0, 135.0)},
+    "au": {"lat": (-44.0, -10.0), "lon": (113.0, 154.0)},
+}
+
+
+class RegionManager:
+    """GPS-based automatic region detection for speed database switching.
+
+    On first GPS fix, determines the region from coordinates and switches
+    the database accordingly. Re-checks every 60s in case the device
+    is relocated (e.g., shipped between countries).
+
+    Falls back to HUD_REGION env var or "au" if GPS is unavailable.
+    UI text is always English regardless of region.
+    """
+
+    CHECK_INTERVAL = 60.0  # seconds between geo-checks
+
+    def __init__(self):
+        initial = os.environ.get("HUD_REGION",
+                                 os.environ.get("HUD_LOCALE", "au"))
+        if initial not in _REGION_DATA:
+            initial = "au"
+        self.region = initial
+        self._auto_detected = False
+        self._last_check = 0.0
+
+    @property
+    def default_limit(self):
+        return _REGION_DATA[self.region]["default_limit"]
+
+    @property
+    def zones_db(self):
+        return _REGION_DATA[self.region]["zones_db"]
+
+    @property
+    def cameras_db(self):
+        return _REGION_DATA[self.region]["cameras_db"]
+
+    def detect_region(self, lat, lon):
+        """Determine region from GPS coordinates.
+
+        Returns region key ("au", "cn") or None if outside known regions.
+        """
+        for region, bounds in _REGION_BOUNDS.items():
+            if (bounds["lat"][0] <= lat <= bounds["lat"][1] and
+                    bounds["lon"][0] <= lon <= bounds["lon"][1]):
+                return region
+        return None
+
+    def update(self, lat, lon, now=None):
+        """Check GPS position and switch region if needed.
+
+        Args:
+            lat, lon: current GPS coordinates (WGS-84)
+            now: current time (default: time.time())
+
+        Returns:
+            True if region changed (caller should reload DB), False otherwise
+        """
+        import time as _time
+        if now is None:
+            now = _time.time()
+
+        # Rate-limit checks (skip if checked recently)
+        if now - self._last_check < self.CHECK_INTERVAL:
+            return False
+        self._last_check = now
+
+        # Skip invalid coordinates
+        if lat == 0.0 and lon == 0.0:
+            return False
+
+        new_region = self.detect_region(lat, lon)
+        if new_region is None:
+            return False  # unknown region, keep current
+
+        if new_region != self.region:
+            old = self.region
+            self.region = new_region
+            self._auto_detected = True
+            print(f"\n[region] GPS auto-switch: {old} -> {new_region} "
+                  f"(lat={lat:.2f}, lon={lon:.2f})")
+            return True  # caller should reload speed DB
+
+        if not self._auto_detected:
+            self._auto_detected = True
+            print(f"[region] GPS confirmed: {self.region}")
+
+        return False
+
+
+# Global region manager instance
+region_mgr = RegionManager()
+
+DEFAULT_SPEED_LIMIT = region_mgr.default_limit
 
 # ---------------------------------------------------------------------------
 # Serial port (raw termios, from gps_reader.py)
@@ -150,6 +269,20 @@ def parse_gpgga(parts):
 # ---------------------------------------------------------------------------
 # GPS state
 # ---------------------------------------------------------------------------
+
+def write_speed_ipc(speed_kmh):
+    """Write current vehicle speed to IPC file for C inference thread.
+
+    The C inference thread reads this to adjust its detection frequency:
+    faster speed -> more frequent inference.
+    """
+    try:
+        with open(SPEED_IPC_TMP, "w") as f:
+            f.write(f"{speed_kmh:.1f}\n")
+        os.rename(SPEED_IPC_TMP, SPEED_IPC_FILE)
+    except OSError:
+        pass  # non-critical, C side falls back to default rate
+
 
 class GPSState:
     def __init__(self):
@@ -1303,7 +1436,7 @@ def render_hud(fb, gps, state=None, detect=None):
         fb.fill_rect(badge_x, badge_y + badge_h - 2, badge_w, 2, cam_color)
         fb.fill_rect(badge_x, badge_y, 2, badge_h, cam_color)
         fb.fill_rect(badge_x + badge_w - 2, badge_y, 2, badge_h, cam_color)
-        # "CAMERA" text centered in badge
+        # Camera label text centered in badge
         cam_text = "CAMERA"
         cam_tw = fb.measure_text(cam_text, 1)
         cam_tx = badge_x + (badge_w - cam_tw) // 2
@@ -1338,30 +1471,45 @@ def main():
 
     print(f"HUD Live - GPS: {device} @ {baudrate} baud")
     print(f"Framebuffer: {FB_DEV} ({FB_W}x{FB_H})")
-    print(f"Default speed limit: {DEFAULT_SPEED_LIMIT} km/h")
+    print(f"Region: {region_mgr.region} (auto-detect from GPS enabled)")
+    print(f"Default speed limit: {region_mgr.default_limit} km/h")
     print(f"NPU detection IPC: {NPU_DETECT_FILE}")
 
     # --- Load offline speed database (optional) ---
-    speed_db = None
-    speed_fusion = None
-    SPEED_DB_ZONES = "/root/data/speed_zones.db"
-    SPEED_DB_CAMERAS = "/root/data/speed_cameras.db"
+    # DB module is imported once; instances are recreated on region switch.
+    SpeedDB_cls = None
+    SpeedFusion_cls = None
+    fuse_camera_warning_fn = None
     try:
-        from speed_db import SpeedDB, SpeedFusion, fuse_camera_warning
-        zones_ok = os.path.isfile(SPEED_DB_ZONES)
-        cameras_ok = os.path.isfile(SPEED_DB_CAMERAS)
-        if zones_ok or cameras_ok:
-            speed_db = SpeedDB(
-                zones_path=SPEED_DB_ZONES if zones_ok else None,
-                cameras_path=SPEED_DB_CAMERAS if cameras_ok else None,
-            )
-            print(f"Speed DB: {speed_db.zone_count} zones, "
-                  f"{speed_db.camera_count} cameras")
-        else:
-            print("Speed DB: no database files found, using NPU only")
-        speed_fusion = SpeedFusion(default_limit=DEFAULT_SPEED_LIMIT)
+        from speed_db import SpeedDB as SpeedDB_cls
+        from speed_db import SpeedFusion as SpeedFusion_cls
+        from speed_db import fuse_camera_warning as fuse_camera_warning_fn
     except ImportError:
         print("Speed DB: module not available, using NPU only")
+
+    def load_speed_db():
+        """Load speed DB for current region. Returns (speed_db, speed_fusion)."""
+        if SpeedDB_cls is None:
+            return None, None
+        zones_path = region_mgr.zones_db
+        cameras_path = region_mgr.cameras_db
+        zones_ok = os.path.isfile(zones_path)
+        cameras_ok = os.path.isfile(cameras_path)
+        db = None
+        if zones_ok or cameras_ok:
+            db = SpeedDB_cls(
+                zones_path=zones_path if zones_ok else None,
+                cameras_path=cameras_path if cameras_ok else None,
+            )
+            print(f"Speed DB [{region_mgr.region.upper()}]: "
+                  f"{db.zone_count} zones, {db.camera_count} cameras")
+        else:
+            print(f"Speed DB [{region_mgr.region.upper()}]: "
+                  f"no database files found, using NPU only")
+        fusion = SpeedFusion_cls(default_limit=region_mgr.default_limit)
+        return db, fusion
+
+    speed_db, speed_fusion = load_speed_db()
 
     print("Press Ctrl+C to stop\n")
 
@@ -1419,6 +1567,20 @@ def main():
             if rmc_seen:
                 detect.poll()  # check for NPU detection updates
 
+                # Write speed to IPC for C adaptive inference rate
+                spd_ipc = gps.speed_kmh if gps.valid else 0.0
+                write_speed_ipc(spd_ipc)
+
+                # --- GPS-based region auto-detection ---
+                if gps.valid and gps.lat != 0.0:
+                    region_changed = region_mgr.update(
+                        gps.lat, gps.lon)
+                    if region_changed:
+                        print(f"\n[REGION] Switched to "
+                              f"{region_mgr.region.upper()}")
+                        speed_db, speed_fusion = load_speed_db()
+                        hud_state.base_layer = None  # force redraw
+
                 # --- Fuse speed DB + NPU results ---
                 if speed_fusion and gps.valid and gps.lat != 0.0:
                     db_limit = 0
@@ -1438,7 +1600,7 @@ def main():
                         detect.confidence)
 
                     # Fuse camera warning: DB proximity OR NPU detection
-                    show_cam, cam_dist, cam_src = fuse_camera_warning(
+                    show_cam, cam_dist, cam_src = fuse_camera_warning_fn(
                         db_cameras,
                         detect.camera_detected)
                     detect.camera_detected = show_cam
@@ -1468,6 +1630,11 @@ def main():
         fb.flush()
         fb.close()
         os.close(gps_fd)
+        # Clean up speed IPC file
+        try:
+            os.unlink(SPEED_IPC_FILE)
+        except OSError:
+            pass
         print("Done.")
 
 

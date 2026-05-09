@@ -428,11 +428,12 @@ static void *inference_thread_func(void *arg) {
     free(targ);  /* Allocated by rknn_detect_start_thread */
 
     const char *src_name = (src_type == RKNN_SRC_VI) ? "VI" : "VPSS";
-    printf("[INFO] RKNN inference thread started (%s dev=%d, chn=%d)\n",
-           src_name, dev_id, chn_id);
+    printf("[INFO] RKNN inference thread started (%s dev=%d, chn=%d, "
+           "adaptive rate enabled)\n", src_name, dev_id, chn_id);
 
     int consecutive_errors = 0;
     detect_result_group_t local_result;
+    float last_logged_speed = -999.0f;
 
     while (!ctx->thread_should_stop) {
         /*
@@ -473,6 +474,8 @@ static void *inference_thread_func(void *arg) {
         VIDEO_FRAME_S *vf = &frame_info.stVFrame;
         void *frame_vaddr = RK_MPI_MB_Handle2VirAddr(vf->pMbBlk);
 
+        int64_t frame_t0 = get_current_time_us();
+
         if (frame_vaddr) {
             /* Run inference */
             memset(&local_result, 0, sizeof(local_result));
@@ -506,6 +509,39 @@ static void *inference_thread_func(void *arg) {
             RK_MPI_VI_ReleaseChnFrame(dev_id, chn_id, &frame_info);
         } else {
             RK_MPI_VPSS_ReleaseChnFrame(dev_id, chn_id, &frame_info);
+        }
+
+        /*
+         * Adaptive inference rate: sleep based on vehicle speed.
+         *
+         * Higher speed -> shorter sleep -> more frequent detection.
+         * At 0-5 km/h (parked), inference runs every ~5s to save power.
+         * At 100+ km/h (highway), inference runs every ~200ms for
+         * timely construction zone / camera detection.
+         */
+        int64_t frame_t1 = get_current_time_us();
+        float frame_ms = (float)(frame_t1 - frame_t0) / 1000.0f;
+        float speed_kmh = hud_ipc_read_speed();
+        int sleep_ms = hud_ipc_adaptive_sleep_ms(speed_kmh, frame_ms);
+
+        /* Log speed bracket changes (avoid spamming) */
+        if (speed_kmh >= 0 &&
+            ((last_logged_speed < 0) ||
+             (speed_kmh >= 100 && last_logged_speed < 100) ||
+             (speed_kmh < 100 && last_logged_speed >= 100) ||
+             (speed_kmh < 5 && last_logged_speed >= 5) ||
+             (speed_kmh >= 5 && last_logged_speed < 5))) {
+            printf("[INFO] Adaptive rate: speed=%.0f km/h, "
+                   "interval=%dms (infer=%.0fms)\n",
+                   speed_kmh, sleep_ms + (int)frame_ms, frame_ms);
+            last_logged_speed = speed_kmh;
+        }
+
+        /* Sleep in 100ms increments for responsive shutdown */
+        for (int ms = 0; ms < sleep_ms && !ctx->thread_should_stop;
+             ms += 100) {
+            int chunk = (sleep_ms - ms > 100) ? 100 : (sleep_ms - ms);
+            usleep(chunk * 1000);
         }
     }
 

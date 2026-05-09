@@ -22,6 +22,10 @@ FB_DEV="/dev/fb0"
 # Ensure RKMPI libraries are in the search path (init.d may not inherit profile)
 export LD_LIBRARY_PATH="/oem/usr/lib:/oem/lib:${LD_LIBRARY_PATH}"
 
+# HUD region: "au" (Australia) or "cn" (China)
+# GPS auto-detects region, this sets the default before first GPS fix
+export HUD_REGION="${HUD_REGION:-au}"
+
 log() {
     echo "$(date '+%Y-%m-%d %H:%M:%S') $1" >> "$LOGFILE"
 }

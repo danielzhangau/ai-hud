@@ -2,9 +2,14 @@
 """Generate HUD splash screen for 480x480 RGB LCD display.
 
 Serves as both a display test image and project boot screen.
+
+Usage:
+  python src/generate_splash.py
 """
 
 import math
+import os
+
 from PIL import Image, ImageDraw, ImageFont, ImageFilter
 
 W, H = 480, 480
@@ -55,11 +60,16 @@ def add_glow(img, cx, cy, radius, color, strength=0.35):
 
 
 def draw_arc(draw, cx, cy, r, start, end, color, width):
-    draw.arc([cx - r, cy - r, cx + r, cy + r], start=start, end=end, fill=color, width=width)
+    draw.arc([cx - r, cy - r, cx + r, cy + r], start=start, end=end,
+             fill=color, width=width)
 
 
-def main():
-    import os
+def render_splash():
+    """Render splash screen image.
+
+    Returns:
+        PIL.Image
+    """
     img = Image.new("RGB", (W, H), BG)
     draw = ImageDraw.Draw(img)
 
@@ -95,7 +105,8 @@ def main():
 
     # -- Subtitle --
     fnt_sub = font_r(19, bold=True)
-    center_text(draw, cx, cy + 55, "INTELLIGENT DRIVING ASSISTANT", fnt_sub, BLUE)
+    center_text(draw, cx, cy + 55,
+                "INTELLIGENT DRIVING ASSISTANT", fnt_sub, BLUE)
 
     # -- Bottom status dots (simulating system check) --
     dot_y = cy + 110 + H // 12
@@ -113,7 +124,8 @@ def main():
         draw = ImageDraw.Draw(img)
         # Label
         fnt_dot = font_r(18, bold=True)
-        center_text(draw, dx, dot_y + 24, label, fnt_dot, (120, 128, 145))
+        center_text(draw, dx, dot_y + 24, label,
+                    fnt_dot, (120, 128, 145))
 
     # -- Corner accents (matching HUD aesthetic) --
     ac = 30
@@ -131,8 +143,14 @@ def main():
     draw.line([(W - 12, H - 12), (W - 12 - ac, H - 12)], fill=ac_color, width=2)
     draw.line([(W - 12, H - 12), (W - 12, H - 12 - ac)], fill=ac_color, width=2)
 
+    return img
+
+
+def main():
     out = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "mockups")
     os.makedirs(out, exist_ok=True)
+
+    img = render_splash()
     filename = f"{out}/splash_screen.png"
     img.save(filename, "PNG", quality=95)
     print(f"  -> {filename}")
