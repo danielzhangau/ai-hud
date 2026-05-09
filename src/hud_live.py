@@ -1528,6 +1528,14 @@ def main():
     # Initial render (before any GPS data - builds base layer cache)
     render_hud(fb, gps, hud_state, detect)
 
+    # Signal C binary (pip_render_thread) that HUD is ready for PiP overlay.
+    # Must be AFTER initial render so splash is replaced before camera appears.
+    try:
+        with open("/tmp/ai_hud_ready", "w") as f:
+            f.write("1\n")
+    except OSError:
+        pass
+
     try:
         while True:
             try:
@@ -1600,10 +1608,11 @@ def main():
                         detect.confidence)
 
                     # Fuse camera warning: DB proximity OR NPU detection
-                    show_cam, cam_dist, cam_src = fuse_camera_warning_fn(
-                        db_cameras,
-                        detect.camera_detected)
-                    detect.camera_detected = show_cam
+                    if fuse_camera_warning_fn is not None:
+                        show_cam, cam_dist, cam_src = fuse_camera_warning_fn(
+                            db_cameras,
+                            detect.camera_detected)
+                        detect.camera_detected = show_cam
                 elif speed_fusion and not gps.valid:
                     # Lost GPS fix -- reset fusion state
                     speed_fusion.reset()
@@ -1630,11 +1639,12 @@ def main():
         fb.flush()
         fb.close()
         os.close(gps_fd)
-        # Clean up speed IPC file
-        try:
-            os.unlink(SPEED_IPC_FILE)
-        except OSError:
-            pass
+        # Clean up IPC files
+        for ipc_f in (SPEED_IPC_FILE, "/tmp/ai_hud_ready"):
+            try:
+                os.unlink(ipc_f)
+            except OSError:
+                pass
         print("Done.")
 
 

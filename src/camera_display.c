@@ -411,6 +411,21 @@ static void nv12_480_to_pip_xrgb(const uint8_t *nv12, uint8_t *xrgb) {
 static void *pip_render_thread(void *arg) {
     (void)arg;
 
+    /*
+     * Wait for HUD (hud_live.py) to signal readiness before rendering.
+     * Without this, PiP frames overwrite the splash screen before the
+     * Python HUD has started.  Timeout after 15s (fallback: render anyway).
+     */
+    printf("[INFO] PiP: waiting for HUD ready signal...\n");
+    for (int i = 0; i < 150 && g_running; i++) {  /* 150 * 100ms = 15s max */
+        if (access("/tmp/ai_hud_ready", F_OK) == 0)
+            break;
+        usleep(100 * 1000);
+    }
+    if (!g_running)
+        return NULL;
+    printf("[INFO] PiP: HUD ready, starting camera overlay\n");
+
     /* Open and mmap framebuffer */
     g_fb_fd = open(FB_DEV, O_RDWR);
     if (g_fb_fd < 0) {

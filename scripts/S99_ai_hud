@@ -8,7 +8,7 @@
 #   4. Start hud_live.py (Python: GPS + IPC -> framebuffer display)
 
 AI_HUD="/root/ai-hud"
-AI_HUD_MODEL="/root/model/yolov5n_rv1106.rknn"
+AI_HUD_MODEL="/root/model/au_speed_signs_rv1106.rknn"
 AI_HUD_PIDFILE="/var/run/ai_hud_c.pid"
 
 HUD_PY="/root/hud_live.py"
@@ -59,6 +59,13 @@ clear_screen() {
 
 start() {
     log "===== START ====="
+
+    # Kill any leftover instances from previous boot/crash
+    pkill -f "ai-hud" 2>/dev/null
+    pkill -f "hud_live.py" 2>/dev/null
+    rm -f "$AI_HUD_PIDFILE" "$HUD_PY_PIDFILE"
+    rm -f /tmp/ai_hud_ready /tmp/ai_hud_detect /tmp/ai_hud_speed
+    sleep 1
 
     # Make sure display-blocking processes are stopped first
     kill_display_blockers
@@ -117,6 +124,9 @@ stop() {
     else
         pkill -f "ai-hud" 2>/dev/null
     fi
+
+    # Clean up IPC files
+    rm -f /tmp/ai_hud_ready /tmp/ai_hud_detect /tmp/ai_hud_speed
 
     # Clear the framebuffer to black
     clear_screen
