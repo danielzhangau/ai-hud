@@ -51,6 +51,10 @@ SPEED_IPC_TMP = "/tmp/ai_hud_speed.tmp"
 NPU_ENABLE_FILE = "/tmp/ai_hud_npu_enable"
 NPU_ENABLE_TMP = "/tmp/ai_hud_npu_enable.tmp"
 
+# GPS coordinates IPC file -- Python writes, C frame capture reads
+GPS_IPC_FILE = "/tmp/ai_hud_gps"
+GPS_IPC_TMP = "/tmp/ai_hud_gps.tmp"
+
 # ---------------------------------------------------------------------------
 # Region system -- GPS auto-detect for DB switching (UI always English)
 # ---------------------------------------------------------------------------
@@ -298,6 +302,21 @@ def write_npu_enable_ipc(enabled):
         with open(NPU_ENABLE_TMP, "w") as f:
             f.write("1\n" if enabled else "0\n")
         os.rename(NPU_ENABLE_TMP, NPU_ENABLE_FILE)
+    except OSError:
+        pass
+
+
+def write_gps_ipc(lat, lon):
+    """Write GPS coordinates to IPC file for C frame capture metadata.
+
+    The C frame capture module reads lat/lon to tag saved frames
+    with location data for offline labeling.
+    """
+    try:
+        with open(GPS_IPC_TMP, "w") as f:
+            f.write(f"lat={lat:.6f}\n")
+            f.write(f"lon={lon:.6f}\n")
+        os.rename(GPS_IPC_TMP, GPS_IPC_FILE)
     except OSError:
         pass
 
@@ -1610,6 +1629,10 @@ def main():
                 # Write speed to IPC for C adaptive inference rate
                 spd_ipc = gps.speed_kmh if gps.valid else 0.0
                 write_speed_ipc(spd_ipc)
+
+                # Write GPS coords to IPC for C frame capture metadata
+                if gps.valid:
+                    write_gps_ipc(gps.lat, gps.lon)
 
                 # --- GPS-based region auto-detection ---
                 if gps.valid and gps.lat != 0.0:

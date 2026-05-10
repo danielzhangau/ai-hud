@@ -147,6 +147,7 @@ set(SOURCES
     src/camera_display.c
     src/rknn_detect.c
     src/postprocess.c
+    src/frame_capture.c
 )
 
 # --------------------------------------------------------------------------

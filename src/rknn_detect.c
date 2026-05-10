@@ -24,6 +24,7 @@
 #include "rknn_detect.h"
 #include "postprocess.h"
 #include "hud_ipc.h"
+#include "frame_capture.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -431,6 +432,9 @@ static void *inference_thread_func(void *arg) {
     printf("[INFO] RKNN inference thread started (%s dev=%d, chn=%d, "
            "adaptive rate enabled)\n", src_name, dev_id, chn_id);
 
+    /* Initialize frame capture for model iteration */
+    capture_init(NULL, 0);
+
     int consecutive_errors = 0;
     detect_result_group_t local_result;
     float last_logged_speed = -999.0f;
@@ -521,6 +525,13 @@ static void *inference_thread_func(void *arg) {
                     hud_ipc_update_from_detections(
                         local_result.count, cls_ids, confs);
                 }
+
+                /* Data capture: save frame for model iteration */
+                float cap_speed = hud_ipc_read_speed();
+                capture_check_and_save(
+                    (const uint8_t *)frame_vaddr,
+                    vf->u32Width, vf->u32Height,
+                    &local_result, cap_speed);
             }
         }
 
@@ -565,6 +576,7 @@ static void *inference_thread_func(void *arg) {
         }
     }
 
+    capture_release();
     ctx->thread_running = 0;
     printf("[INFO] RKNN inference thread exiting (processed %lu frames)\n",
            (unsigned long)ctx->total_frames);
