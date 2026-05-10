@@ -7,9 +7,12 @@
  * Reference: rknpu2 rknn_yolov5_demo (airockchip/rknn-toolkit2)
  *
  * The RKNN model exports 3 output tensors in NHWC layout (RV1106):
- *   output0: [1, 40, 40, 3*(5+9)] = [1, 40, 40, 42]  stride 8
- *   output1: [1, 20, 20, 3*(5+9)] = [1, 20, 20, 42]  stride 16
- *   output2: [1, 10, 10, 3*(5+9)] = [1, 10, 10, 42]  stride 32
+ *   output0: [1, H/8,  W/8,  3*(5+C)]  stride 8
+ *   output1: [1, H/16, W/16, 3*(5+C)]  stride 16
+ *   output2: [1, H/32, W/32, 3*(5+C)]  stride 32
+ *
+ * Grid dimensions are computed at runtime from model input size.
+ * Example: 640x640 -> 80x80, 40x40, 20x20
  *
  * Each anchor produces (5 + OBJ_CLASS_NUM) values:
  *   [tx, ty, tw, th, obj_conf, cls0, cls1, ..., cls8]

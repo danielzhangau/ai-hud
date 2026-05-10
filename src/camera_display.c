@@ -6,7 +6,7 @@
  *
  * VI dual-channel configuration (official Luckfox pattern for RV1106):
  *   VI CHN0 (mainpath): 2304x1296 -> VPSS -> 480x480 -> VO (display, bind)
- *   VI CHN1 (selfpath): 480x480 -> NPU inference (user-mode GetChnFrame)
+ *   VI CHN1 (selfpath): 640x640 -> NPU inference (user-mode GetChnFrame)
  *
  * Usage:
  *   ./ai-hud                              Display-only mode
@@ -50,10 +50,10 @@
 /*
  * VI CHN1 (NPU) output resolution.
  * The ISP selfpath crops from center and resizes to this square.
- * Using 480x480 (same as display) with software resize to model input.
+ * Using 640x640 to match model input size and avoid upscaling artifacts.
  */
-#define VI_NPU_WIDTH        480
-#define VI_NPU_HEIGHT       480
+#define VI_NPU_WIDTH        640
+#define VI_NPU_HEIGHT       640
 
 /* VPSS (Video Processing Sub-System) */
 #define VPSS_GRP_ID         0
