@@ -65,11 +65,13 @@ _REGION_DATA = {
         "default_limit": 100,
         "zones_db": "/root/data/speed_zones.db",
         "cameras_db": "/root/data/speed_cameras.db",
+        "valid_speeds": {30, 40, 50, 60, 70, 80, 90, 100, 110},
     },
     "cn": {
         "default_limit": 120,
         "zones_db": "/root/data/speed_zones_cn.db",
         "cameras_db": "/root/data/speed_cameras_cn.db",
+        "valid_speeds": {20, 30, 40, 50, 60, 70, 80, 100, 110, 120},
     },
 }
 
@@ -402,7 +404,14 @@ class DetectionState:
                     key, val = line.split("=", 1)
                     if key == "speed_limit":
                         try:
-                            self.speed_limit = int(val)
+                            detected = int(val)
+                            # Filter by region: ignore speeds not used locally
+                            valid = _REGION_DATA.get(
+                                region_mgr.region, {}
+                            ).get("valid_speeds")
+                            if detected == 0 or valid is None or detected in valid:
+                                self.speed_limit = detected
+                            # else: ignore (e.g., 20km/h detected in AU)
                         except ValueError:
                             pass
                     elif key == "camera":

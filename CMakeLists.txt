@@ -89,14 +89,10 @@ endif()
 add_definitions(-DRV1106_RV1103)
 
 # --------------------------------------------------------------------------
-# Region selection: AU (default, 9-class) or CN (8-class)
-# Build with: cmake .. -DREGION_CN=ON
+# Universal model: 11-class speed signs (AU + CN)
+# No region-specific build needed -- filtering done in Python (hud_live.py)
 # --------------------------------------------------------------------------
-option(REGION_CN "Build for China region (8-class CN speed sign model)" OFF)
-if(REGION_CN)
-    add_definitions(-DOBJ_CLASS_NUM=8 -DHUD_REGION_CN)
-    message(STATUS "Region: China (OBJ_CLASS_NUM=8)")
-endif()
+# OBJ_CLASS_NUM defaults to 11 in postprocess.h
 
 # --------------------------------------------------------------------------
 # COCO test mode: use 80-class COCO model for NPU pipeline testing

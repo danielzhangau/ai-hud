@@ -1,85 +1,57 @@
-# YOLOv5n 模型转换 (ONNX -> RKNN)
+# Speed Signs Model -- ONNX to RKNN Conversion
 
-将 YOLOv5n ONNX 模型转换为 RV1106 可用的 RKNN INT8 量化模型。
+Convert YOLOv5n ONNX model to RKNN INT8 for RV1106 NPU deployment.
 
-## 环境要求
+## Model Versions
 
-- **操作系统**: Linux (x86_64 或 aarch64)
-- **Python**: 3.8 - 3.12
-- **rknn-toolkit2**: >= 2.3.0 (仅 PC 端转换使用, 非板端)
+| Version | Classes | Description |
+|---------|---------|-------------|
+| v2 | 11 (20-120 km/h) | Universal AU+CN, MTSD trained |
+| v1 | 8-9 | Legacy AU/CN separate models |
 
-```bash
-pip install rknn-toolkit2
-```
+## Output Files
 
-> 注意: rknn-toolkit2 仅支持 Linux。如果使用 macOS/Windows，请在 Docker 容器中运行。
+Training produces three artifacts (named by `MODEL_VERSION` in notebook):
 
-## 使用步骤
+| File | Format | Usage |
+|------|--------|-------|
+| `speed_signs_v2.pt` | PyTorch | Archive / fine-tuning |
+| `speed_signs_v2.onnx` | ONNX | Intermediate for RKNN conversion |
+| `speed_signs_v2_rv1106.rknn` | RKNN INT8 | **Deploy to device** |
 
-### 1. 下载预训练模型
+## Conversion
 
-```bash
-cd models
-chmod +x download_model.sh
-./download_model.sh
-```
+Conversion is handled automatically in `train_colab.ipynb` (cells 7-8).
 
-模型来源: [airockchip/rknn_model_zoo](https://github.com/airockchip/rknn_model_zoo)，已针对 RKNN 量化优化。
-
-### 2. 准备量化校准数据集
-
-创建 `dataset.txt` 文件，每行一个图片的绝对路径:
-
-```
-/path/to/calibration/image1.jpg
-/path/to/calibration/image2.jpg
-...
-```
-
-建议使用 20-100 张包含限速标志和测速摄像头的代表性图片。
-
-### 3. 执行模型转换
+For local conversion:
 
 ```bash
 python convert_to_rknn.py
 ```
 
-常用参数:
+| Parameter | Description | Default |
+|-----------|-------------|---------|
+| `--onnx` | Input ONNX model path | `yolov5n.onnx` |
+| `--output` | Output RKNN model path | `yolov5n_rv1106.rknn` |
+| `--dataset` | Calibration image list | `dataset.txt` |
+| `--platform` | Target platform | `rv1106` |
 
-| 参数 | 说明 | 默认值 |
-|------|------|--------|
-| `--onnx` | 输入 ONNX 模型路径 | `yolov5n.onnx` |
-| `--output` | 输出 RKNN 模型路径 | `yolov5n_rv1106.rknn` |
-| `--dataset` | 量化校准数据集 | `dataset.txt` |
-| `--platform` | 目标平台 | `rv1106` |
-| `--accuracy-analysis` | 执行量化精度分析 | 关闭 |
-| `--verbose` | 详细日志 | 关闭 |
+Requires Linux x86_64 + `rknn-toolkit2 >= 2.3.0`.
 
-### 4. 部署到设备
-
-将生成的 `.rknn` 文件通过 SCP 传输到 Luckfox Pico Ultra:
+## Deploy
 
 ```bash
-scp yolov5n_rv1106.rknn root@<device_ip>:/opt/ai-hud/models/
+adb push speed_signs_v2_rv1106.rknn /root/model/
+adb push build/ai-hud /root/ai-hud
 ```
 
-## 自训练模型导出
+## Technical Details
 
-如果使用自己训练的 YOLOv5n 模型，需通过 [airockchip/yolov5](https://github.com/airockchip/yolov5) fork 导出:
-
-```bash
-./download_model.sh --export your_model.pt
-```
-
-必须使用 `--rknpu` 标志导出，以确保输出格式兼容 RKNN 量化。
-
-## 技术细节
-
-| 项目 | 值 |
-|------|-----|
-| 模型 | YOLOv5n (airockchip 优化版) |
-| 输入尺寸 | 320 x 320 |
-| 量化类型 | INT8 |
-| 归一化 | mean=[0,0,0], std=[255,255,255] (即 pixel/255.0) |
-| 目标平台 | rv1106 (Luckfox Pico Ultra, RV1106G3) |
-| NPU 算力 | 1.0 TOPS |
+| Item | Value |
+|------|-------|
+| Model | YOLOv5n (airockchip fork) |
+| Input | 640 x 640 |
+| Quantization | INT8 |
+| Normalization | mean=[0,0,0], std=[255,255,255] |
+| Target | rv1106 (RV1106G3, 0.5 TOPS NPU) |
+| Classes | 11 (OBJ_CLASS_NUM=11) |

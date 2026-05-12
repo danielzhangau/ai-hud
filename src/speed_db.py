@@ -306,11 +306,11 @@ class QueryResult:
 # ---------------------------------------------------------------------------
 
 # NPU must meet ALL of these to be considered:
-NPU_CONFIDENCE_MIN = 0.60       # minimum single-frame confidence
+NPU_CONFIDENCE_MIN = 0.70       # minimum single-frame confidence (conservative)
 NPU_VOTE_REQUIRED = 3           # consecutive matching detections needed
-NPU_OVERRIDE_TIMEOUT = 30.0     # seconds before reverting to DB
+NPU_OVERRIDE_TIMEOUT = 15.0     # seconds before reverting to DB (shorter = safer)
 # When DB has no data, NPU threshold is slightly relaxed:
-NPU_CONFIDENCE_NO_DB = 0.55
+NPU_CONFIDENCE_NO_DB = 0.60
 
 
 class SpeedFusion:

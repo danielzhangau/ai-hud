@@ -27,14 +27,14 @@ extern "C" {
 /*
  * OBJ_CLASS_NUM: number of detection classes.
  * Override at compile time with -DOBJ_CLASS_NUM=80 for COCO testing.
- * Default: 9 (Australian speed signs + speed camera)
+ * Default: 11 (universal speed signs covering AU + CN)
  */
 #ifndef OBJ_CLASS_NUM
-#define OBJ_CLASS_NUM       9
+#define OBJ_CLASS_NUM       11
 #endif
 
 #define NMS_THRESH          0.45f   /* IoU threshold for NMS             */
-#define BOX_THRESH          0.25f   /* Object confidence threshold       */
+#define BOX_THRESH          0.40f   /* Object confidence threshold (conservative) */
 #define PROP_BOX_SIZE       (5 + OBJ_CLASS_NUM)  /* 4 coords + 1 obj + classes */
 
 /* YOLOv5 has 3 detection heads with 3 anchors each */
