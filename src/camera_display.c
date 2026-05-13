@@ -375,23 +375,28 @@ static inline int clamp8(int v) {
 }
 
 /*
- * Point-sample 480x480 NV12 down to 120x120 XRGB8888 (4x downscale).
+ * NV12 480x480 -> XRGB fullscreen (480x480) for CAM display mode.
+ * Reserves a top-left corner for the Python-rendered settings gear icon.
  * BT.601 full-range conversion, integer fixed-point arithmetic.
  */
-static void nv12_480_to_pip_xrgb(const uint8_t *nv12, uint8_t *xrgb) {
-    const int src_w  = DISPLAY_WIDTH;               /* 480 */
-    const int src_h  = DISPLAY_HEIGHT;              /* 480 */
-    const int scale  = DISPLAY_WIDTH / PIP_SIZE;    /* 4   */
+
+/* Top-left pixel region reserved for Python gear icon overlay.
+ * Gear center (18,18) with 8px teeth radius + 3px tooth size = ~29px max.
+ * Use 40px for padding.  Python draws gear here; C never overwrites it. */
+#define GEAR_RESERVE_SIZE   40
+
+static void nv12_480_to_fullscreen_xrgb(const uint8_t *nv12, uint8_t *fb) {
+    const int w = DISPLAY_WIDTH;
+    const int h = DISPLAY_HEIGHT;
     const uint8_t *y_plane  = nv12;
-    const uint8_t *uv_plane = nv12 + src_w * src_h;
+    const uint8_t *uv_plane = nv12 + w * h;
 
-    for (int dy = 0; dy < PIP_SIZE; dy++) {
-        int sy = dy * scale;
-        for (int dx = 0; dx < PIP_SIZE; dx++) {
-            int sx = dx * scale;
-
-            int y_val  = y_plane[sy * src_w + sx];
-            int uv_off = (sy / 2) * src_w + (sx & ~1);
+    for (int row = 0; row < h; row++) {
+        /* Skip reserved gear icon region (top-left corner) */
+        int col_start = (row < GEAR_RESERVE_SIZE) ? GEAR_RESERVE_SIZE : 0;
+        for (int col = col_start; col < w; col++) {
+            int y_val  = y_plane[row * w + col];
+            int uv_off = (row / 2) * w + (col & ~1);
             int u = uv_plane[uv_off]     - 128;
             int v = uv_plane[uv_off + 1] - 128;
 
@@ -399,13 +404,32 @@ static void nv12_480_to_pip_xrgb(const uint8_t *nv12, uint8_t *xrgb) {
             int g = clamp8(y_val - ((88 * u + 183 * v) >> 8));
             int b = clamp8(y_val + ((454 * u) >> 8));
 
-            int off = (dy * PIP_SIZE + dx) * FB_BPP;
-            xrgb[off]     = (uint8_t)b;
-            xrgb[off + 1] = (uint8_t)g;
-            xrgb[off + 2] = (uint8_t)r;
-            xrgb[off + 3] = 0xFF;
+            int off = (row * w + col) * FB_BPP;
+            fb[off]     = (uint8_t)b;
+            fb[off + 1] = (uint8_t)g;
+            fb[off + 2] = (uint8_t)r;
+            fb[off + 3] = 0xFF;
         }
     }
+}
+
+/*
+ * Display-mode IPC file written by Python (hud_live.py).
+ * File contains "cam\n" for camera mode; absent or "hud\n" for HUD mode.
+ * When settings overlay is active, /tmp/ai_hud_pip_hide exists and
+ * camera rendering is paused regardless of display mode.
+ */
+#define DISPLAY_MODE_IPC   "/tmp/ai_hud_display_mode"
+#define PIP_HIDE_IPC       "/tmp/ai_hud_pip_hide"
+
+static int read_display_mode_cam(void) {
+    /* Returns 1 if CAM mode requested, 0 for HUD (default). */
+    FILE *f = fopen(DISPLAY_MODE_IPC, "r");
+    if (!f) return 0;
+    char buf[8] = {0};
+    fread(buf, 1, sizeof(buf) - 1, f);
+    fclose(f);
+    return (buf[0] == 'c');  /* "cam" */
 }
 
 static void *pip_render_thread(void *arg) {
@@ -413,18 +437,18 @@ static void *pip_render_thread(void *arg) {
 
     /*
      * Wait for HUD (hud_live.py) to signal readiness before rendering.
-     * Without this, PiP frames overwrite the splash screen before the
-     * Python HUD has started.  Timeout after 15s (fallback: render anyway).
+     * Without this, camera frames overwrite the splash screen before the
+     * Python HUD has started.  Timeout after 15s (fallback: start anyway).
      */
     printf("[INFO] PiP: waiting for HUD ready signal...\n");
-    for (int i = 0; i < 150 && g_running; i++) {  /* 150 * 100ms = 15s max */
+    for (int i = 0; i < 150 && g_running; i++) {
         if (access("/tmp/ai_hud_ready", F_OK) == 0)
             break;
         usleep(100 * 1000);
     }
     if (!g_running)
         return NULL;
-    printf("[INFO] PiP: HUD ready, starting camera overlay\n");
+    printf("[INFO] PiP: HUD ready, camera render thread active\n");
 
     /* Open and mmap framebuffer */
     g_fb_fd = open(FB_DEV, O_RDWR);
@@ -446,11 +470,10 @@ static void *pip_render_thread(void *arg) {
     printf("[INFO] PiP render: fb mapped (%dx%d XRGB8888, stride=%d)\n",
            VO_SCREEN_WIDTH, VO_SCREEN_HEIGHT, FB_STRIDE);
 
-    /* Per-frame XRGB buffer for the 120x120 PiP region */
-    static uint8_t pip_xrgb[PIP_SIZE * PIP_SIZE * FB_BPP];
-
     VIDEO_FRAME_INFO_S frame;
     int frame_count = 0;
+    int mode_check_counter = 0;
+    int cam_mode = 0;
 
     while (g_running) {
         int ret = RK_MPI_VPSS_GetChnFrame(VPSS_GRP_ID, VPSS_CHN_DISPLAY,
@@ -458,20 +481,21 @@ static void *pip_render_thread(void *arg) {
         if (ret != 0)
             continue;
 
-        void *vaddr = RK_MPI_MB_Handle2VirAddr(frame.stVFrame.pMbBlk);
-        if (vaddr) {
-            /* NV12 480x480 -> XRGB 120x120 */
-            nv12_480_to_pip_xrgb((const uint8_t *)vaddr, pip_xrgb);
+        /* Check display mode IPC every 15 frames (~0.6s at 25fps) */
+        if (++mode_check_counter >= 15) {
+            mode_check_counter = 0;
+            cam_mode = read_display_mode_cam();
+        }
 
-            /* Blit 120x120 PiP region into framebuffer via mmap */
-            for (int y = 0; y < PIP_SIZE; y++) {
-                int fb_off  = (PIP_Y + y) * FB_STRIDE + PIP_X * FB_BPP;
-                int pip_off = y * PIP_SIZE * FB_BPP;
-                memcpy(g_fb_map + fb_off, pip_xrgb + pip_off,
-                       PIP_SIZE * FB_BPP);
+        void *vaddr = RK_MPI_MB_Handle2VirAddr(frame.stVFrame.pMbBlk);
+        if (vaddr && cam_mode) {
+            /* CAM mode: full-screen camera, skip if settings overlay active */
+            if (access(PIP_HIDE_IPC, F_OK) != 0) {
+                nv12_480_to_fullscreen_xrgb((const uint8_t *)vaddr, g_fb_map);
             }
             frame_count++;
         }
+        /* HUD mode: no camera rendering to framebuffer */
 
         RK_MPI_VPSS_ReleaseChnFrame(VPSS_GRP_ID, VPSS_CHN_DISPLAY, &frame);
     }
