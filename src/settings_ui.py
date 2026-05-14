@@ -57,17 +57,19 @@ FUSION_ROW_H = 66
 class SettingsUI:
     """Touch-driven settings overlay."""
 
-    def __init__(self, fb, config, region_mgr):
+    def __init__(self, fb, config, region_mgr, app_version="0.0.0"):
         """Initialize settings UI.
 
         Args:
             fb: Framebuffer instance (from hud_live.py)
             config: ConfigManager instance
             region_mgr: RegionManager instance
+            app_version: Version string displayed in status bar
         """
         self.fb = fb
         self.config = config
         self.region_mgr = region_mgr
+        self.app_version = app_version
 
         self.active = False
         self.page = "main"
@@ -205,7 +207,7 @@ class SettingsUI:
 
         # Status bar
         region = self.region_mgr.region.upper()
-        fb.draw_text(f"v0.2 | {region}", LABEL_X, STATUS_Y + 8, COL_DIM, scale=1)
+        fb.draw_text(f"v{self.app_version} | {region}", LABEL_X, STATUS_Y + 8, COL_DIM, scale=1)
 
         fb.flush()
 

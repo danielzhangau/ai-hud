@@ -22,6 +22,8 @@ import errno
 # ---------------------------------------------------------------------------
 # Display constants
 # ---------------------------------------------------------------------------
+APP_VERSION = "1.0.0"
+
 FB_DEV = "/dev/fb0"
 FB_W = 480
 FB_H = 480
@@ -2879,7 +2881,7 @@ def main():
         from settings_ui import SettingsUI
         touch = TouchInput()
         if touch.available:
-            settings_ui = SettingsUI(fb, config, region_mgr)
+            settings_ui = SettingsUI(fb, config, region_mgr, app_version=APP_VERSION)
 
             # Wire up callbacks
             def _on_npu_toggle(enabled):

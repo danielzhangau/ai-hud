@@ -170,7 +170,7 @@ adb push src/speed_db.py /root/speed_db.py
 adb push src/gps_reader.py /root/gps_reader.py
 
 # RKNN model
-adb push models/speed_signs_v2_rv1106.rknn /root/model/au_speed_signs_rv1106.rknn
+adb push models/speed_signs_rv1106.rknn /root/model/speed_signs_rv1106.rknn
 
 # Speed databases
 adb push data/speed_zones.db /root/data/speed_zones.db

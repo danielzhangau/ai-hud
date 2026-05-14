@@ -61,7 +61,7 @@ AU Roboflow and MTSD have different bbox conventions and CANNOT be merged:
 1. Open `train_colab.ipynb` in Colab
 2. Upload `datasets/mtsd/speed_signs_dataset.tar.gz` (~3G)
 3. Train: YOLOv5n, 640x640, 300 epochs (~2.5h on T4)
-4. Download: `speed_signs_v2.pt`, `speed_signs_v2.onnx`, `speed_signs_v2_rv1106.rknn`
+4. Download: `speed_signs.pt`, `speed_signs.onnx`, `speed_signs_rv1106.rknn`
 
 ### Local Dataset Rebuild
 
@@ -79,7 +79,7 @@ python export.py --weights best.pt --img-size 640 640 --rknpu --include onnx
 # Convert to RKNN INT8 (see train_colab.ipynb cell 7-8)
 
 # Deploy
-adb push speed_signs_v2_rv1106.rknn /root/model/
+adb push speed_signs_rv1106.rknn /root/model/
 adb push build/ai-hud /root/ai-hud
 ```
 
