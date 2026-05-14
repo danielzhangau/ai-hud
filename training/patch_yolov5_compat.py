@@ -6,6 +6,7 @@ Idempotent -- safe to run multiple times. Must be run from the yolov5 repo root.
 Patches:
   1. torch.load(): inject weights_only=False for PyTorch >= 2.6
   2. Pillow getsize(): wrap with getbbox() fallback for Pillow >= 10
+  3. torch.cuda.amp.autocast(): replace with torch.amp.autocast() for PyTorch >= 2.4
 """
 
 import subprocess
@@ -81,6 +82,27 @@ def patch_pillow_getsize():
     print("[Patch] Pillow getsize: applied")
 
 
+def patch_autocast(filepath):
+    """Replace deprecated torch.cuda.amp.autocast with torch.amp.autocast."""
+    with open(filepath, "r") as f:
+        content = f.read()
+    if "torch.cuda.amp.autocast" not in content:
+        return False
+    new_content = content.replace(
+        "torch.cuda.amp.autocast()",
+        'torch.amp.autocast("cuda")',
+    )
+    new_content = new_content.replace(
+        "torch.cuda.amp.autocast(",
+        'torch.amp.autocast("cuda", ',
+    )
+    if new_content != content:
+        with open(filepath, "w") as f:
+            f.write(new_content)
+        return True
+    return False
+
+
 def main():
     # 1. torch.load patch
     files_out = subprocess.run(
@@ -98,6 +120,20 @@ def main():
 
     # 2. Pillow getsize patch
     patch_pillow_getsize()
+
+    # 3. autocast deprecation patch
+    files_out = subprocess.run(
+        ["grep", "-rl", "torch.cuda.amp.autocast", "."],
+        capture_output=True,
+        text=True,
+    ).stdout.strip().split("\n")
+    patched = 0
+    for f in files_out:
+        if f and f.endswith(".py"):
+            if patch_autocast(f):
+                patched += 1
+                print(f"  Patched: {f}")
+    print(f"[Patch] autocast: {patched} files fixed")
 
 
 if __name__ == "__main__":

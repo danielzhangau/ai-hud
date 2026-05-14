@@ -10,6 +10,7 @@ build/
 # Python
 __pycache__/
 *.pyc
+.venv*/
 
 # IDE
 .vscode/
@@ -23,7 +24,13 @@ __pycache__/
 # Training data (too large for git)
 training/au_speed_dataset/
 training/au_speed_dataset.tar.gz
+training/datasets/
 training/downloads/
+training/.wheels/
+
+# 3D model exports (regenerate from .py source)
+enclosure/*.stl
+enclosure/*.step
 
 # Temporary files
 /tmp/
