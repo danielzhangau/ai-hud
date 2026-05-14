@@ -137,6 +137,12 @@ typedef struct _infer_thread_arg_t {
 int rknn_detect_init(rknn_detect_ctx_t *ctx, const char *model_path) {
     if (!ctx) return -1;
 
+    /* Guard against double-init: release existing resources first */
+    if (ctx->initialized) {
+        printf("[WARN] rknn_detect_init called on already-initialized ctx, releasing first\n");
+        rknn_detect_release(ctx);
+    }
+
     memset(ctx, 0, sizeof(rknn_detect_ctx_t));
     pthread_mutex_init(&ctx->result_mutex, NULL);
 

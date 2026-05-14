@@ -30,7 +30,6 @@ PARAM_DEFS = {
     ("fusion", "npu_vote_required"):    (int,   3,    1,    10),
     ("fusion", "npu_override_timeout"): (float, 15.0, 5.0,  120.0),
     ("fusion", "camera_alert_radius"):  (int,   800,  100,  2000),
-    ("fusion", "camera_warn_radius"):   (int,   400,  50,   1000),
 
     # Settings
     ("settings", "npu_enabled"):   (int,   1,    0,    1),
@@ -137,6 +136,7 @@ class ConfigManager:
             return
 
         dir_name = os.path.dirname(self.path) or "."
+        tmp_path = None
         try:
             os.makedirs(dir_name, exist_ok=True)
             fd, tmp_path = tempfile.mkstemp(
@@ -148,10 +148,11 @@ class ConfigManager:
         except OSError as e:
             print(f"[config] WARNING: failed to save {self.path}: {e}")
             # Try to clean up temp file
-            try:
-                os.unlink(tmp_path)
-            except OSError:
-                pass
+            if tmp_path:
+                try:
+                    os.unlink(tmp_path)
+                except OSError:
+                    pass
 
     def get_fusion_params(self):
         """Return dict of all fusion parameters for SpeedFusion constructor."""
@@ -161,7 +162,6 @@ class ConfigManager:
             "vote_required":      self.get_int("fusion", "npu_vote_required"),
             "override_timeout":   self.get_float("fusion", "npu_override_timeout"),
             "camera_alert_radius": self.get_int("fusion", "camera_alert_radius"),
-            "camera_warn_radius": self.get_int("fusion", "camera_warn_radius"),
         }
 
     def reset_section(self, section):

@@ -1,11 +1,19 @@
 #!/bin/sh
 # AI-HUD auto-start script for Buildroot init.d
 #
+# Stability features (retail device):
+#   - Watchdog respawn loops for both processes
+#   - Log rotation (max 1MB per file, keeps 1 backup)
+#   - Clears stale .pyc on startup (no RTC on device)
+#   - Graceful SIGTERM before SIGKILL
+#   - PID validation before kill to prevent PID-reuse accidents
+#
 # Boot sequence:
 #   1. Kill rkipc / demo processes that occupy camera/display
-#   2. Show splash screen for 3 seconds
-#   3. Start ai-hud (C binary: camera -> NPU -> IPC)
-#   4. Start hud_live.py (Python: GPS + IPC -> framebuffer display)
+#   2. Start ai-hud (C binary: camera -> NPU -> IPC)
+#   3. Start hud_live.py (Python: GPS + IPC -> framebuffer display)
+#
+# Note: Splash screen is handled by S01_ai_hud_splash (earliest init).
 
 AI_HUD="/root/ai-hud"
 AI_HUD_MODEL="/root/model/au_speed_signs_rv1106.rknn"
@@ -15,9 +23,19 @@ HUD_PY="/root/hud_live.py"
 HUD_PY_ARGS="/dev/ttyS4 9600"
 HUD_PY_PIDFILE="/var/run/ai_hud_py.pid"
 
+WATCHDOG_C_PID="/var/run/ai_hud_watchdog_c.pid"
+WATCHDOG_PY_PID="/var/run/ai_hud_watchdog_py.pid"
+
 LOGFILE="/var/log/ai_hud.log"
+LOGFILE_C="/var/log/ai_hud_c.log"
 SPLASH_BIN="/root/splash_raw.bin"
 FB_DEV="/dev/fb0"
+
+# Max log size in bytes (1 MB)
+LOG_MAX_SIZE=1048576
+
+# Respawn delay (seconds) after crash
+RESPAWN_DELAY=3
 
 # Ensure RKMPI libraries are in the search path (init.d may not inherit profile)
 export LD_LIBRARY_PATH="/oem/usr/lib:/oem/lib:${LD_LIBRARY_PATH}"
@@ -28,6 +46,25 @@ export HUD_REGION="${HUD_REGION:-au}"
 
 log() {
     echo "$(date '+%Y-%m-%d %H:%M:%S') $1" >> "$LOGFILE"
+}
+
+rotate_log() {
+    # Rotate a log file if it exceeds LOG_MAX_SIZE
+    _logfile="$1"
+    if [ -f "$_logfile" ]; then
+        _size=$(wc -c < "$_logfile" 2>/dev/null || echo 0)
+        if [ "$_size" -gt "$LOG_MAX_SIZE" ]; then
+            mv -f "$_logfile" "${_logfile}.old"
+            log "Rotated $_logfile ($_size bytes)"
+        fi
+    fi
+}
+
+clear_pyc() {
+    # Device has no RTC; Python can't reliably check .pyc timestamps.
+    # Remove all .pyc files on every boot to ensure fresh bytecode.
+    find /root -name '*.pyc' -delete 2>/dev/null
+    find /root -name '__pycache__' -type d -exec rm -rf {} + 2>/dev/null
 }
 
 kill_display_blockers() {
@@ -52,9 +89,75 @@ show_splash() {
 
 clear_screen() {
     if [ -e "$FB_DEV" ]; then
-        log "Clearing framebuffer"
         dd if=/dev/zero of="$FB_DEV" bs=1k 2>/dev/null
     fi
+}
+
+# Safe kill: verify PID matches expected process name before killing
+safe_kill() {
+    _pidfile="$1"
+    _procname="$2"
+    _signal="${3:-TERM}"
+
+    [ -f "$_pidfile" ] || return 1
+    _pid=$(cat "$_pidfile" 2>/dev/null)
+    [ -n "$_pid" ] || return 1
+
+    # Verify the PID is still the expected process (prevent PID-reuse kills)
+    if [ -d "/proc/$_pid" ]; then
+        _cmdline=$(cat "/proc/$_pid/cmdline" 2>/dev/null | tr '\0' ' ')
+        case "$_cmdline" in
+            *"$_procname"*) kill -"$_signal" "$_pid" 2>/dev/null; return 0 ;;
+        esac
+    fi
+    return 1
+}
+
+# Watchdog loop: restart process on crash
+watchdog_c() {
+    while true; do
+        if [ -x "$AI_HUD" ] && [ -f "$AI_HUD_MODEL" ]; then
+            "$AI_HUD" --model "$AI_HUD_MODEL" >> "$LOGFILE_C" 2>&1 &
+            _pid=$!
+            echo "$_pid" > "$AI_HUD_PIDFILE"
+            log "ai-hud started PID=$_pid (with model)"
+            wait "$_pid"
+        elif [ -x "$AI_HUD" ]; then
+            "$AI_HUD" >> "$LOGFILE_C" 2>&1 &
+            _pid=$!
+            echo "$_pid" > "$AI_HUD_PIDFILE"
+            log "ai-hud started PID=$_pid (display-only)"
+            wait "$_pid"
+        else
+            log "WARNING: $AI_HUD not found, watchdog_c sleeping"
+            sleep 60
+            continue
+        fi
+        _exit=$?
+        log "ai-hud exited with code $_exit, restarting in ${RESPAWN_DELAY}s"
+        rotate_log "$LOGFILE_C"
+        sleep "$RESPAWN_DELAY"
+    done
+}
+
+watchdog_py() {
+    while true; do
+        if [ -f "$HUD_PY" ]; then
+            python3 -u "$HUD_PY" $HUD_PY_ARGS >> "$LOGFILE" 2>&1 &
+            _pid=$!
+            echo "$_pid" > "$HUD_PY_PIDFILE"
+            log "hud_live.py started PID=$_pid"
+            wait "$_pid"
+        else
+            log "ERROR: $HUD_PY not found, watchdog_py sleeping"
+            sleep 60
+            continue
+        fi
+        _exit=$?
+        log "hud_live.py exited with code $_exit, restarting in ${RESPAWN_DELAY}s"
+        rotate_log "$LOGFILE"
+        sleep "$RESPAWN_DELAY"
+    done
 }
 
 start() {
@@ -63,70 +166,69 @@ start() {
     # Kill any leftover instances from previous boot/crash
     pkill -f "ai-hud" 2>/dev/null
     pkill -f "hud_live.py" 2>/dev/null
+    # Kill leftover watchdog loops
+    safe_kill "$WATCHDOG_C_PID" "watchdog" KILL
+    safe_kill "$WATCHDOG_PY_PID" "watchdog" KILL
     rm -f "$AI_HUD_PIDFILE" "$HUD_PY_PIDFILE"
+    rm -f "$WATCHDOG_C_PID" "$WATCHDOG_PY_PID"
     rm -f /tmp/ai_hud_ready /tmp/ai_hud_detect /tmp/ai_hud_speed
     sleep 1
+
+    # Rotate logs before starting
+    rotate_log "$LOGFILE"
+    rotate_log "$LOGFILE_C"
+
+    # Clear stale Python bytecode (no RTC on device)
+    clear_pyc
 
     # Make sure display-blocking processes are stopped first
     kill_display_blockers
 
-    # Show splash screen and hold for 3 seconds
+    # Splash already displayed by S01_ai_hud_splash; refresh if needed
     show_splash
-    sleep 3
 
-    # Launch ai-hud C binary (camera + NPU inference pipeline)
-    if [ -x "$AI_HUD" ] && [ -f "$AI_HUD_MODEL" ]; then
-        log "Starting $AI_HUD --model $AI_HUD_MODEL"
-        ( nohup "$AI_HUD" --model "$AI_HUD_MODEL" >> "$LOGFILE" 2>&1 & echo $! > "$AI_HUD_PIDFILE" )
-        sleep 2  # Wait for camera pipeline to initialize
-        log "ai-hud started with PID $(cat $AI_HUD_PIDFILE 2>/dev/null)"
-    elif [ -x "$AI_HUD" ]; then
-        # No model file: run display-only mode
-        log "Starting $AI_HUD (display-only, no model)"
-        ( nohup "$AI_HUD" >> "$LOGFILE" 2>&1 & echo $! > "$AI_HUD_PIDFILE" )
-        sleep 2
-        log "ai-hud started with PID $(cat $AI_HUD_PIDFILE 2>/dev/null)"
-    else
-        log "WARNING: $AI_HUD not found, skipping camera pipeline"
-    fi
+    # Launch watchdog for C binary (camera + NPU)
+    watchdog_c &
+    echo $! > "$WATCHDOG_C_PID"
+    sleep 2  # Wait for camera pipeline to initialize
 
-    # Launch hud_live.py (GPS HUD + NPU result display)
-    if [ -f "$HUD_PY" ]; then
-        log "Starting $HUD_PY $HUD_PY_ARGS"
-        ( nohup python3 "$HUD_PY" $HUD_PY_ARGS >> "$LOGFILE" 2>&1 & echo $! > "$HUD_PY_PIDFILE" )
-        log "hud_live.py started with PID $(cat $HUD_PY_PIDFILE 2>/dev/null)"
-    else
-        log "ERROR: $HUD_PY not found, cannot start HUD display"
-    fi
+    # Launch watchdog for Python HUD
+    watchdog_py &
+    echo $! > "$WATCHDOG_PY_PID"
+
+    log "Watchdogs started: C=$(cat $WATCHDOG_C_PID) Py=$(cat $WATCHDOG_PY_PID)"
 }
 
 stop() {
     log "===== STOP ====="
 
-    # Stop hud_live.py first (it writes to framebuffer)
-    if [ -f "$HUD_PY_PIDFILE" ]; then
-        kill "$(cat $HUD_PY_PIDFILE)" 2>/dev/null
-        sleep 1
-        kill -9 "$(cat $HUD_PY_PIDFILE)" 2>/dev/null
-        rm -f "$HUD_PY_PIDFILE"
-        log "Stopped hud_live.py"
-    else
-        pkill -f "hud_live.py" 2>/dev/null
-    fi
+    # 1. Stop watchdog loops first (prevent respawn during shutdown)
+    safe_kill "$WATCHDOG_C_PID" "S99_ai_hud" TERM
+    safe_kill "$WATCHDOG_PY_PID" "S99_ai_hud" TERM
+    sleep 1
+    safe_kill "$WATCHDOG_C_PID" "S99_ai_hud" KILL
+    safe_kill "$WATCHDOG_PY_PID" "S99_ai_hud" KILL
+    rm -f "$WATCHDOG_C_PID" "$WATCHDOG_PY_PID"
 
-    # Stop ai-hud (camera + NPU pipeline)
-    if [ -f "$AI_HUD_PIDFILE" ]; then
-        kill "$(cat $AI_HUD_PIDFILE)" 2>/dev/null
-        sleep 2  # Give RKMPI time to clean up
-        kill -9 "$(cat $AI_HUD_PIDFILE)" 2>/dev/null
-        rm -f "$AI_HUD_PIDFILE"
-        log "Stopped ai-hud"
-    else
-        pkill -f "ai-hud" 2>/dev/null
-    fi
+    # 2. Graceful SIGTERM to worker processes
+    safe_kill "$HUD_PY_PIDFILE" "hud_live" TERM
+    safe_kill "$AI_HUD_PIDFILE" "ai-hud" TERM
+    sleep 2  # Give RKMPI time to clean up
+
+    # 3. Force kill if still alive
+    safe_kill "$HUD_PY_PIDFILE" "hud_live" KILL
+    safe_kill "$AI_HUD_PIDFILE" "ai-hud" KILL
+
+    # 4. Fallback: kill by name (catches orphaned processes)
+    pkill -f "hud_live.py" 2>/dev/null
+    pkill -f "ai-hud" 2>/dev/null
+
+    rm -f "$AI_HUD_PIDFILE" "$HUD_PY_PIDFILE"
 
     # Clean up IPC files
     rm -f /tmp/ai_hud_ready /tmp/ai_hud_detect /tmp/ai_hud_speed
+    rm -f /tmp/ai_hud_npu_enable /tmp/ai_hud_gps /tmp/ai_hud_display_mode
+    rm -f /tmp/ai_hud_pip_hide
 
     # Clear the framebuffer to black
     clear_screen

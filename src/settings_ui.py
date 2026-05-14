@@ -4,48 +4,54 @@ Full-screen overlay that replaces HUD when active. Uses the same
 Framebuffer class from hud_live.py for all drawing.
 
 Layout (480x480):
-  - Top bar (0-50):   title + close button
-  - Items (60-410):   list of settings, each row ~60px
-  - Status bar (430-480): device info
+  - Top bar (0-48):   title + back/close buttons with accent underline
+  - Items (52-430):   list of settings with description subtitles
+  - Status bar (440-480): version and region
 
 Pages:
-  - "main":   NPU toggle, region, fusion entry
-  - "fusion": all NPU fusion parameters with +/- controls
+  - "main":   display mode, NPU toggle, region, fusion entry
+  - "fusion": NPU fusion parameters with +/- controls and descriptions
 
 No third-party dependencies.
 """
 
 import os
+import time
 
 # ---------------------------------------------------------------------------
-# Colors (consistent with HUD dark theme)
+# Colors (dark theme, refined)
 # ---------------------------------------------------------------------------
 
 COL_BG = (8, 10, 15)
-COL_PANEL = (20, 24, 32)
-COL_ROW_ALT = (16, 19, 26)
-COL_WHITE = (245, 248, 255)
-COL_DIM = (100, 110, 130)
-COL_ACCENT = (60, 140, 255)
-COL_GREEN = (50, 220, 120)
-COL_RED = (255, 55, 60)
-COL_TOGGLE_ON = (50, 220, 120)
-COL_TOGGLE_OFF = (80, 85, 100)
-COL_SLIDER_BG = (40, 44, 55)
-COL_SLIDER_FILL = (60, 140, 255)
-COL_BTN = (35, 40, 55)
-COL_BTN_DANGER = (120, 30, 35)
+COL_HEADER = (14, 17, 24)
+COL_ROW_A = (12, 15, 21)
+COL_ROW_B = (16, 19, 27)
+COL_SEP = (28, 32, 42)
+COL_WHITE = (235, 240, 252)
+COL_DIM = (80, 88, 108)
+COL_DESC = (65, 72, 92)
+COL_ACCENT = (55, 135, 255)
+COL_GREEN = (45, 210, 110)
+COL_RED = (245, 55, 60)
+COL_TOGGLE_ON = (40, 190, 100)
+COL_TOGGLE_OFF = (50, 55, 68)
+COL_TOGGLE_KNOB = (230, 235, 245)
+COL_BTN = (30, 35, 48)
+COL_BTN_BORDER = (45, 50, 65)
+COL_BTN_DANGER = (100, 25, 30)
+COL_BTN_DANGER_BORDER = (160, 40, 45)
 
 # Layout constants
-ROW_HEIGHT = 58
-TOP_BAR_H = 52
-CONTENT_Y = TOP_BAR_H + 4
-STATUS_Y = 432
-LABEL_X = 20
-VALUE_X = 320
-ROW_PAD = 8
 SCREEN_W = 480
 SCREEN_H = 480
+TOP_BAR_H = 48
+ACCENT_LINE_Y = TOP_BAR_H - 2
+CONTENT_Y = TOP_BAR_H + 6
+STATUS_Y = 442
+LABEL_X = 24
+VALUE_X = 310
+MAIN_ROW_H = 60
+FUSION_ROW_H = 66
 
 
 class SettingsUI:
@@ -74,7 +80,7 @@ class SettingsUI:
 
         # Page definitions
         self._main_items = [
-            {"key": "display_mode", "label": "Display",         "type": "choice",
+            {"key": "display_mode", "label": "Display",        "type": "choice",
              "choices": ["hud", "cam"], "display": {"hud": "HUD", "cam": "CAM"}},
             {"key": "npu_enabled",  "label": "NPU Detection",  "type": "toggle"},
             {"key": "region",       "label": "Region",          "type": "choice",
@@ -83,18 +89,21 @@ class SettingsUI:
         ]
 
         self._fusion_items = [
-            {"key": "npu_confidence_min",   "label": "Conf (DB)",
+            {"key": "npu_confidence_min",   "label": "NPU Confidence",
+             "desc": "min trust level (has data)",
              "type": "float", "min": 0.10, "max": 1.00, "step": 0.05, "fmt": ".2f"},
-            {"key": "npu_confidence_no_db", "label": "Conf (no DB)",
+            {"key": "npu_confidence_no_db", "label": "NPU Confidence",
+             "desc": "min trust level (no data)",
              "type": "float", "min": 0.10, "max": 1.00, "step": 0.05, "fmt": ".2f"},
-            {"key": "npu_vote_required",    "label": "Vote Count",
+            {"key": "npu_vote_required",    "label": "Confirm Count",
+             "desc": "consecutive detections needed",
              "type": "int",   "min": 1,    "max": 10,   "step": 1,    "fmt": "d"},
-            {"key": "npu_override_timeout", "label": "Timeout (s)",
+            {"key": "npu_override_timeout", "label": "NPU Timeout",
+             "desc": "seconds until override resets",
              "type": "float", "min": 5.0,  "max": 120.0, "step": 5.0, "fmt": ".0f"},
-            {"key": "camera_alert_radius",  "label": "Cam Alert (m)",
+            {"key": "camera_alert_radius",  "label": "Camera Range",
+             "desc": "alert radius in meters",
              "type": "int",   "min": 100,  "max": 2000, "step": 100,  "fmt": "d"},
-            {"key": "camera_warn_radius",   "label": "Cam Warn (m)",
-             "type": "int",   "min": 50,   "max": 1000, "step": 50,   "fmt": "d"},
             {"key": "_reset",               "label": "Reset Defaults",
              "type": "button_danger"},
         ]
@@ -103,14 +112,17 @@ class SettingsUI:
     # Public API
     # -----------------------------------------------------------------------
 
-    # IPC file to pause C-side PiP rendering while settings is visible
+    # IPC file to pause C-side camera rendering while settings is visible
     _PIP_HIDE_IPC = "/tmp/ai_hud_pip_hide"
+
+    _INACTIVITY_TIMEOUT = 30  # seconds: auto-close if no touch
 
     def activate(self):
         """Enter settings overlay."""
         self.active = True
         self.page = "main"
-        # Signal C binary to pause PiP camera overlay
+        self._last_interaction = time.time()
+        # Signal C binary to pause camera rendering
         try:
             with open(self._PIP_HIDE_IPC, "w") as f:
                 f.write("1")
@@ -121,19 +133,29 @@ class SettingsUI:
     def deactivate(self):
         """Exit settings, return to HUD."""
         self.active = False
-        # Resume PiP camera overlay
+        # Resume camera rendering
         try:
             os.unlink(self._PIP_HIDE_IPC)
         except OSError:
             pass
 
+    def check_timeout(self):
+        """Auto-close settings after inactivity. Call from main loop."""
+        if not self.active:
+            return False
+        if time.time() - self._last_interaction > self._INACTIVITY_TIMEOUT:
+            print("[SETTINGS] inactivity timeout, auto-closing")
+            self.deactivate()
+            return True  # caller should restore display
+        return False
+
     def handle_touch(self, event):
         """Process a TouchEvent. Returns True if event was consumed."""
         if not self.active:
             return False
+        self._last_interaction = time.time()
 
         if event.gesture != "tap":
-            # Swipe left on fusion page -> back to main
             if event.gesture == "swipe_right" and self.page == "fusion":
                 self.page = "main"
                 self.render()
@@ -157,7 +179,8 @@ class SettingsUI:
         if y < CONTENT_Y or y > STATUS_Y:
             return True  # tap in non-interactive area
 
-        row_index = (y - CONTENT_Y) // ROW_HEIGHT
+        row_h = FUSION_ROW_H if self.page == "fusion" else MAIN_ROW_H
+        row_index = (y - CONTENT_Y) // row_h
         items = self._main_items if self.page == "main" else self._fusion_items
 
         if row_index < 0 or row_index >= len(items):
@@ -175,93 +198,161 @@ class SettingsUI:
 
         if self.page == "main":
             self._render_top_bar("SETTINGS", show_back=False)
-            self._render_items(self._main_items, "settings")
+            self._render_main_items()
         elif self.page == "fusion":
             self._render_top_bar("FUSION PARAMS", show_back=True)
-            self._render_items(self._fusion_items, "fusion")
+            self._render_fusion_items()
 
         # Status bar
         region = self.region_mgr.region.upper()
-        fb.draw_text(f"v0.2 | {region}", LABEL_X, STATUS_Y + 10, COL_DIM, scale=1)
+        fb.draw_text(f"v0.2 | {region}", LABEL_X, STATUS_Y + 8, COL_DIM, scale=1)
 
         fb.flush()
 
     # -----------------------------------------------------------------------
-    # Rendering helpers
+    # Top bar
     # -----------------------------------------------------------------------
 
     def _render_top_bar(self, title, show_back=False):
-        """Draw top bar with title and close button."""
+        """Draw header with title, accent underline, and close button."""
         fb = self.fb
-        fb.fill_rect(0, 0, SCREEN_W, TOP_BAR_H, COL_PANEL)
+        fb.fill_rect(0, 0, SCREEN_W, TOP_BAR_H, COL_HEADER)
+
+        # Accent underline (2px)
+        fb.fill_rect(0, ACCENT_LINE_Y, SCREEN_W, 2, COL_ACCENT)
 
         # Back arrow (fusion page only)
         if show_back:
             fb.draw_text("<", 16, 14, COL_ACCENT, scale=2)
 
-        # Title
-        title_x = 50 if show_back else LABEL_X
-        fb.draw_text(title, title_x, 16, COL_WHITE, scale=2)
+        # Title centered or left-aligned
+        title_x = 56 if show_back else LABEL_X
+        fb.draw_text(title, title_x, 14, COL_WHITE, scale=2)
 
-        # Close button [X]
-        fb.draw_text("X", SCREEN_W - 34, 16, COL_RED, scale=2)
+        # Close button: circle with X
+        cx, cy = SCREEN_W - 30, TOP_BAR_H // 2
+        fb.fill_circle(cx, cy, 14, COL_BTN)
+        fb.draw_text("X", cx - 5, cy - 6, COL_RED, scale=1)
 
-    def _render_items(self, items, section):
-        """Render a list of setting items."""
+    # -----------------------------------------------------------------------
+    # Main page rendering
+    # -----------------------------------------------------------------------
+
+    def _render_main_items(self):
+        """Render main settings items."""
         fb = self.fb
-        for i, item in enumerate(items):
-            row_y = CONTENT_Y + i * ROW_HEIGHT
+        for i, item in enumerate(self._main_items):
+            row_y = CONTENT_Y + i * MAIN_ROW_H
 
-            # Alternating row background
-            bg = COL_ROW_ALT if i % 2 == 0 else COL_BG
-            fb.fill_rect(0, row_y, SCREEN_W, ROW_HEIGHT, bg)
+            # Row background (subtle alternation)
+            bg = COL_ROW_A if i % 2 == 0 else COL_ROW_B
+            fb.fill_rect(0, row_y, SCREEN_W, MAIN_ROW_H, bg)
 
-            # Separator line
-            fb.fill_rect(LABEL_X, row_y + ROW_HEIGHT - 1,
-                         SCREEN_W - LABEL_X * 2, 1, COL_PANEL)
+            # Bottom separator
+            fb.fill_rect(LABEL_X, row_y + MAIN_ROW_H - 1,
+                         SCREEN_W - LABEL_X * 2, 1, COL_SEP)
 
-            # Label
-            label_y = row_y + (ROW_HEIGHT - 16) // 2
+            # Label (vertically centered)
+            label_y = row_y + (MAIN_ROW_H - 12) // 2
             fb.draw_text(item["label"], LABEL_X, label_y, COL_WHITE, scale=1)
 
             # Value widget
             itype = item["type"]
             if itype == "toggle":
-                self._render_toggle(item, section, row_y)
+                self._render_toggle(item, "settings", row_y, MAIN_ROW_H)
             elif itype == "choice":
-                self._render_choice(item, section, row_y)
+                self._render_choice(item, "settings", row_y, MAIN_ROW_H)
             elif itype == "submenu":
-                fb.draw_text(">", SCREEN_W - 40, label_y, COL_ACCENT, scale=1)
-            elif itype in ("int", "float"):
-                self._render_numeric(item, section, row_y)
-            elif itype == "button_danger":
-                self._render_button(item, row_y, COL_BTN_DANGER)
+                arrow_y = row_y + (MAIN_ROW_H - 12) // 2
+                fb.draw_text(">", SCREEN_W - 40, arrow_y, COL_ACCENT, scale=1)
 
-    def _render_toggle(self, item, section, row_y):
-        """Draw ON/OFF toggle indicator."""
+    # -----------------------------------------------------------------------
+    # Fusion page rendering (two-line rows with descriptions)
+    # -----------------------------------------------------------------------
+
+    def _render_fusion_items(self):
+        """Render fusion parameter items with descriptions."""
+        fb = self.fb
+        for i, item in enumerate(self._fusion_items):
+            row_y = CONTENT_Y + i * FUSION_ROW_H
+
+            # Row background
+            bg = COL_ROW_A if i % 2 == 0 else COL_ROW_B
+            fb.fill_rect(0, row_y, SCREEN_W, FUSION_ROW_H, bg)
+
+            # Bottom separator
+            fb.fill_rect(LABEL_X, row_y + FUSION_ROW_H - 1,
+                         SCREEN_W - LABEL_X * 2, 1, COL_SEP)
+
+            itype = item["type"]
+
+            if itype == "button_danger":
+                self._render_button(item, row_y, FUSION_ROW_H)
+                continue
+
+            # Line 1: Label (left) + value controls (right)
+            line1_y = row_y + 10
+            fb.draw_text(item["label"], LABEL_X, line1_y, COL_WHITE, scale=1)
+
+            # Line 2: Description
+            desc = item.get("desc", "")
+            if desc:
+                line2_y = row_y + 30
+                fb.draw_text(desc, LABEL_X + 8, line2_y, COL_DESC, scale=1)
+
+            # Value controls
+            if itype in ("int", "float"):
+                self._render_numeric(item, "fusion", row_y, FUSION_ROW_H)
+
+    # -----------------------------------------------------------------------
+    # Widget renderers
+    # -----------------------------------------------------------------------
+
+    def _render_toggle(self, item, section, row_y, row_h):
+        """Draw iOS-style pill toggle switch."""
         fb = self.fb
         val = self.config.get_int(section, item["key"])
-        text = "ON" if val else "OFF"
-        color = COL_TOGGLE_ON if val else COL_TOGGLE_OFF
-        text_y = row_y + (ROW_HEIGHT - 16) // 2
-        # Draw pill background
-        pill_x = VALUE_X
-        pill_y = row_y + (ROW_HEIGHT - 28) // 2
-        fb.fill_rect(pill_x, pill_y, 70, 28, color)
-        fb.draw_text(text, pill_x + 12, text_y, COL_WHITE, scale=1)
 
-    def _render_choice(self, item, section, row_y):
-        """Draw current choice value."""
+        # Pill dimensions
+        pill_w, pill_h = 56, 28
+        pill_x = VALUE_X + 20
+        pill_y = row_y + (row_h - pill_h) // 2
+        knob_r = 10
+
+        pill_color = COL_TOGGLE_ON if val else COL_TOGGLE_OFF
+        knob_cx = (pill_x + pill_w - pill_h // 2) if val else (pill_x + pill_h // 2)
+        pill_cy = pill_y + pill_h // 2
+
+        # Pill body + rounded ends
+        fb.fill_rect(pill_x, pill_y, pill_w, pill_h, pill_color)
+        fb.fill_circle(pill_x + pill_h // 2, pill_cy, pill_h // 2, pill_color)
+        fb.fill_circle(pill_x + pill_w - pill_h // 2, pill_cy, pill_h // 2, pill_color)
+        # Knob
+        fb.fill_circle(knob_cx, pill_cy, knob_r, COL_TOGGLE_KNOB)
+
+    def _render_choice(self, item, section, row_y, row_h):
+        """Draw choice button with border accent."""
         fb = self.fb
         raw = self.config.get_str(section, item["key"])
         display_map = item.get("display", {})
         display = display_map.get(raw, raw.upper())
-        text_y = row_y + (ROW_HEIGHT - 16) // 2
-        fb.fill_rect(VALUE_X, row_y + (ROW_HEIGHT - 28) // 2, 70, 28, COL_BTN)
-        fb.draw_text(display, VALUE_X + 12, text_y, COL_ACCENT, scale=1)
 
-    def _render_numeric(self, item, section, row_y):
-        """Draw numeric value with [-] [value] [+] controls."""
+        btn_w, btn_h = 64, 28
+        btn_x = VALUE_X + 16
+        btn_y = row_y + (row_h - btn_h) // 2
+
+        # Outlined button
+        fb.fill_rect(btn_x, btn_y, btn_w, btn_h, COL_BTN)
+        fb.draw_rect(btn_x, btn_y, btn_w, btn_h, COL_ACCENT)
+
+        # Centered text
+        text_w = len(display) * 8  # approximate at scale=1
+        text_x = btn_x + (btn_w - text_w) // 2
+        text_y = row_y + (row_h - 12) // 2
+        fb.draw_text(display, text_x, text_y, COL_ACCENT, scale=1)
+
+    def _render_numeric(self, item, section, row_y, row_h):
+        """Draw numeric value with styled [-] [value] [+] controls."""
         fb = self.fb
         key = item["key"]
         fmt = item.get("fmt", "")
@@ -272,33 +363,42 @@ class SettingsUI:
             val = self.config.get_int(section, key)
 
         text = f"{val:{fmt}}" if fmt else str(val)
-        text_y = row_y + (ROW_HEIGHT - 16) // 2
+
+        # Control layout (aligned to right side)
+        ctrl_y = row_y + 6
+        btn_size = 28
 
         # [-] button
-        btn_y = row_y + (ROW_HEIGHT - 28) // 2
-        fb.fill_rect(VALUE_X, btn_y, 36, 28, COL_BTN)
-        fb.draw_text("-", VALUE_X + 12, text_y, COL_RED, scale=1)
+        minus_x = VALUE_X
+        fb.fill_rect(minus_x, ctrl_y, btn_size, btn_size, COL_BTN)
+        fb.draw_rect(minus_x, ctrl_y, btn_size, btn_size, COL_BTN_BORDER)
+        fb.draw_text("-", minus_x + 10, ctrl_y + 8, COL_RED, scale=1)
 
-        # Value
-        fb.draw_text(text, VALUE_X + 46, text_y, COL_WHITE, scale=1)
+        # Value text (centered between buttons)
+        val_x = minus_x + btn_size + 8
+        fb.draw_text(text, val_x, ctrl_y + 8, COL_WHITE, scale=1)
 
         # [+] button
-        plus_x = VALUE_X + 110
-        fb.fill_rect(plus_x, btn_y, 36, 28, COL_BTN)
-        fb.draw_text("+", plus_x + 12, text_y, COL_GREEN, scale=1)
+        plus_x = VALUE_X + 120
+        fb.fill_rect(plus_x, ctrl_y, btn_size, btn_size, COL_BTN)
+        fb.draw_rect(plus_x, ctrl_y, btn_size, btn_size, COL_BTN_BORDER)
+        fb.draw_text("+", plus_x + 10, ctrl_y + 8, COL_GREEN, scale=1)
 
-    def _render_button(self, item, row_y, bg_color):
-        """Draw a full-width action button."""
+    def _render_button(self, item, row_y, row_h):
+        """Draw a full-width action button with border."""
         fb = self.fb
         btn_x = LABEL_X
-        btn_y = row_y + (ROW_HEIGHT - 34) // 2
+        btn_y = row_y + (row_h - 34) // 2
         btn_w = SCREEN_W - LABEL_X * 2
         btn_h = 34
-        fb.fill_rect(btn_x, btn_y, btn_w, btn_h, bg_color)
-        # Center text
+
+        fb.fill_rect(btn_x, btn_y, btn_w, btn_h, COL_BTN_DANGER)
+        fb.draw_rect(btn_x, btn_y, btn_w, btn_h, COL_BTN_DANGER_BORDER)
+
+        # Centered text
         text_w = len(item["label"]) * 8
         text_x = btn_x + (btn_w - text_w) // 2
-        text_y = btn_y + (btn_h - 16) // 2 + 1
+        text_y = btn_y + (btn_h - 12) // 2 + 1
         fb.draw_text(item["label"], text_x, text_y, COL_WHITE, scale=1)
 
     # -----------------------------------------------------------------------
@@ -338,14 +438,14 @@ class SettingsUI:
             # Determine if tap hit [-] or [+]
             section = "fusion"
             step = item["step"]
-            if tap_x < VALUE_X + 36:
+            if tap_x < VALUE_X + 28:
                 # [-] button
                 if item["type"] == "float":
                     val = self.config.get_float(section, key) - step
                 else:
                     val = self.config.get_int(section, key) - step
                 val = max(item["min"], val)
-            elif tap_x > VALUE_X + 100:
+            elif tap_x > VALUE_X + 110:
                 # [+] button
                 if item["type"] == "float":
                     val = self.config.get_float(section, key) + step

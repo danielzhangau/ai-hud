@@ -16,6 +16,8 @@ import struct
 import fcntl
 import termios
 import math
+import signal
+import errno
 
 # ---------------------------------------------------------------------------
 # Display constants
@@ -203,6 +205,22 @@ def open_serial(device="/dev/ttyS4", baudrate=9600):
     flags = fcntl.fcntl(fd, fcntl.F_GETFL)
     fcntl.fcntl(fd, fcntl.F_SETFL, flags & ~os.O_NONBLOCK)
     return fd
+
+
+def open_serial_retry(device="/dev/ttyS4", baudrate=9600,
+                      retries=10, retry_delay=2):
+    """Open serial with retry for boot-time race conditions."""
+    for attempt in range(1, retries + 1):
+        try:
+            return open_serial(device, baudrate)
+        except OSError as e:
+            print(f"[GPS] Open {device} failed "
+                  f"(attempt {attempt}/{retries}): {e}")
+            if attempt < retries:
+                time.sleep(retry_delay)
+    print(f"[GPS] WARNING: cannot open {device} after {retries} attempts, "
+          f"running without GPS")
+    return -1
 
 # ---------------------------------------------------------------------------
 # NMEA parsing (from gps_reader.py)
@@ -398,7 +416,7 @@ class DetectionState:
 
     def __init__(self, filepath=NPU_DETECT_FILE):
         self.filepath = filepath
-        self.speed_limit = DEFAULT_SPEED_LIMIT
+        self.speed_limit = region_mgr.default_limit
         self.camera_detected = False
         self.confidence = 0.0
         self.last_poll = 0
@@ -454,7 +472,7 @@ class DetectionState:
         write_npu_enable_ipc(self.npu_enabled)
         if not self.npu_enabled:
             # Clear stale NPU results when disabled
-            self.speed_limit = DEFAULT_SPEED_LIMIT
+            self.speed_limit = region_mgr.default_limit
             self.camera_detected = False
             self.confidence = 0.0
 
@@ -500,29 +518,29 @@ _GLYPHS = {
         "................",
     ],
     '1': [
-        "....##..........",
-        "...###..........",
-        "..####..........",
-        ".#.###..........",
-        "...###..........",
-        "...###..........",
-        "...###..........",
-        "...###..........",
-        "...###..........",
-        "...###..........",
-        "...###..........",
-        "...###..........",
-        "...###..........",
-        "...###..........",
-        "...###..........",
-        "...###..........",
-        "...###..........",
-        "...###..........",
-        "...###..........",
-        "...###..........",
-        "...###..........",
-        ".########.......",
-        ".########.......",
+        "...##...........",
+        "..###...........",
+        ".####...........",
+        "#..##...........",
+        "...##...........",
+        "...##...........",
+        "...##...........",
+        "...##...........",
+        "...##...........",
+        "...##...........",
+        "...##...........",
+        "...##...........",
+        "...##...........",
+        "...##...........",
+        "...##...........",
+        "...##...........",
+        "...##...........",
+        "...##...........",
+        "...##...........",
+        "...##...........",
+        "...##...........",
+        ".######.........",
+        ".######.........",
         "................",
     ],
     '2': [
@@ -612,18 +630,18 @@ _GLYPHS = {
         "##..............",
         "#######.........",
         "########........",
+        "##...###........",
         "......##........",
-        ".......##.......",
-        ".......##.......",
-        ".......##.......",
-        ".......##.......",
-        ".......##.......",
-        ".......##.......",
-        ".......##.......",
         "......##........",
-        "##...##.........",
-        "##..###.........",
-        ".#####..........",
+        "......##........",
+        "......##........",
+        "......##........",
+        "......##........",
+        "......##........",
+        "......##........",
+        "##....##........",
+        "###..###........",
+        ".######.........",
         "..####..........",
         "................",
         "................",
@@ -719,12 +737,12 @@ _GLYPHS = {
         "##....##........",
         "###..###........",
         ".#######........",
-        "..####.##.......",
-        ".......##.......",
-        ".......##.......",
-        ".......##.......",
-        ".......##.......",
-        "##....##........",
+        "..#####.........",
+        "......##........",
+        "......##........",
+        "......##........",
+        "......##........",
+        "......##........",
         "##...##.........",
         "###.###.........",
         ".#####..........",
@@ -762,16 +780,16 @@ _GLYPHS = {
     'm': [
         "................",
         "................",
-        "#.###.###.......",
-        "###.###.##......",
-        "##..##..##......",
-        "##..##..##......",
-        "##..##..##......",
-        "##..##..##......",
-        "##..##..##......",
-        "##..##..##......",
-        "##..##..##......",
-        "##..##..##......",
+        "#.##.##.........",
+        "########........",
+        "##.##.##........",
+        "##.##.##........",
+        "##.##.##........",
+        "##.##.##........",
+        "##.##.##........",
+        "##.##.##........",
+        "##.##.##........",
+        "##....##........",
         "................",
         "................",
         "................",
@@ -850,6 +868,9 @@ _GLYPHS = {
         "###..##.........",
         ".#######........",
         "..#####.........",
+        "................",
+        "................",
+        "................",
         "................",
         "................",
         "................",
@@ -1018,18 +1039,18 @@ _GLYPHS = {
         "................",
     ],
     'C': [
-        "..#####.........",
-        ".#######........",
-        "###...###.......",
-        "##.....##.......",
+        "..####..........",
+        ".######.........",
+        "###..###........",
+        "##....##........",
         "##..............",
         "##..............",
         "##..............",
         "##..............",
-        "##.....##.......",
-        "###...###.......",
-        ".#######........",
-        "..#####.........",
+        "##....##........",
+        "###..###........",
+        ".######.........",
+        "..####..........",
         "................",
         "................",
         "................",
@@ -1122,9 +1143,9 @@ _GLYPHS = {
         "................",
     ],
     'G': [
-        "..#####.........",
-        ".#######........",
-        "###...###.......",
+        "..####..........",
+        ".######.........",
+        "###..###........",
         "##..............",
         "##..............",
         "##..####........",
@@ -1132,8 +1153,8 @@ _GLYPHS = {
         "##....##........",
         "##....##........",
         "###..###........",
-        ".#######........",
-        "..#####.........",
+        ".######.........",
+        "..####..........",
         "................",
         "................",
         "................",
@@ -1174,8 +1195,8 @@ _GLYPHS = {
         "................",
     ],
     'I': [
-        ".######.........",
-        ".######.........",
+        "########........",
+        "########........",
         "...##...........",
         "...##...........",
         "...##...........",
@@ -1184,8 +1205,8 @@ _GLYPHS = {
         "...##...........",
         "...##...........",
         "...##...........",
-        ".######.........",
-        ".######.........",
+        "########........",
+        "########........",
         "................",
         "................",
         "................",
@@ -1278,18 +1299,18 @@ _GLYPHS = {
         "................",
     ],
     'O': [
-        "..#####.........",
-        ".#######........",
-        "###...###.......",
-        "##.....##.......",
-        "##.....##.......",
-        "##.....##.......",
-        "##.....##.......",
-        "##.....##.......",
-        "##.....##.......",
-        "###...###.......",
-        ".#######........",
-        "..#####.........",
+        "..####..........",
+        ".######.........",
+        "###..###........",
+        "##....##........",
+        "##....##........",
+        "##....##........",
+        "##....##........",
+        "##....##........",
+        "##....##........",
+        "###..###........",
+        ".######.........",
+        "..####..........",
         "................",
         "................",
         "................",
@@ -1341,7 +1362,7 @@ _GLYPHS = {
         "##..##..........",
         "##...##.........",
         "##....##........",
-        "##.....##.......",
+        "##....##........",
         "................",
         "................",
         "................",
@@ -2132,13 +2153,25 @@ def _parse_glyph(rows):
 _PARSED = {ch: _parse_glyph(rows) for ch, rows in _GLYPHS.items()}
 
 
+def _compute_glyph_widths():
+    """Pre-compute advance widths for all parsed glyphs."""
+    widths = {}
+    for ch, pixels in _PARSED.items():
+        if ch.isdigit() or ch.isupper():
+            widths[ch] = 8  # fixed monospace width
+        elif not pixels:
+            widths[ch] = GLYPH_W // 2
+        else:
+            widths[ch] = max(c for _, c in pixels) + 1
+    return widths
+
+
+_GLYPH_WIDTHS = _compute_glyph_widths()
+
+
 def _glyph_actual_width(ch):
-    """Return the actual right-most used column + 1 for tighter spacing."""
-    pixels = _PARSED.get(ch)
-    if not pixels:
-        return GLYPH_W // 2  # space
-    max_c = max(c for _, c in pixels)
-    return max_c + 1
+    """Return advance width for a character (pre-computed lookup)."""
+    return _GLYPH_WIDTHS.get(ch, GLYPH_W // 2)
 
 
 # ---------------------------------------------------------------------------
@@ -2148,17 +2181,46 @@ def _glyph_actual_width(ch):
 class Framebuffer:
     """Direct framebuffer access with pixel-level drawing primitives."""
 
-    def __init__(self, device=FB_DEV):
-        self.fd = os.open(device, os.O_RDWR)
+    # Pixel color cache: avoids repeated struct.pack for the same color tuple
+    _pixel_cache = {}
+
+    @classmethod
+    def _pack_pixel(cls, color):
+        """Pack (R, G, B) tuple to 4-byte XRGB. Cached per unique color."""
+        p = cls._pixel_cache.get(color)
+        if p is None:
+            r, g, b = color
+            p = struct.pack('BBBB', b, g, r, 0)
+            cls._pixel_cache[color] = p
+        return p
+
+    def __init__(self, device=FB_DEV, retries=10, retry_delay=2):
+        self.fd = -1
         self.buf = bytearray(FB_STRIDE * FB_H)
+        for attempt in range(1, retries + 1):
+            try:
+                self.fd = os.open(device, os.O_RDWR)
+                break
+            except OSError as e:
+                print(f"[FB] Open {device} failed (attempt {attempt}/{retries}): {e}")
+                if attempt < retries:
+                    time.sleep(retry_delay)
+        if self.fd < 0:
+            print(f"[FB] FATAL: cannot open {device} after {retries} attempts")
+
+    @property
+    def available(self):
+        """Whether framebuffer was successfully opened."""
+        return self.fd >= 0
 
     def close(self):
-        os.close(self.fd)
+        if self.fd >= 0:
+            os.close(self.fd)
+            self.fd = -1
 
     def clear(self, color=COL_BG):
         """Fill entire buffer with a color."""
-        r, g, b = color
-        pixel = struct.pack('BBBB', b, g, r, 0)
+        pixel = self._pack_pixel(color)
         row = pixel * FB_W
         for y in range(FB_H):
             offset = y * FB_STRIDE
@@ -2175,8 +2237,7 @@ class Framebuffer:
 
     def fill_rect(self, x, y, w, h, color):
         """Fill a rectangle."""
-        r, g, b = color
-        pixel = struct.pack('BBBB', b, g, r, 0)
+        pixel = self._pack_pixel(color)
         x0 = max(0, x)
         y0 = max(0, y)
         x1 = min(FB_W, x + w)
@@ -2185,6 +2246,13 @@ class Framebuffer:
         for py in range(y0, y1):
             offset = py * FB_STRIDE + x0 * FB_BPP
             self.buf[offset:offset + len(row_bytes)] = row_bytes
+
+    def draw_rect(self, x, y, w, h, color):
+        """Draw a 1px rectangle outline."""
+        self.fill_rect(x, y, w, 1, color)            # top
+        self.fill_rect(x, y + h - 1, w, 1, color)    # bottom
+        self.fill_rect(x, y, 1, h, color)             # left
+        self.fill_rect(x + w - 1, y, 1, h, color)    # right
 
     def draw_circle(self, cx, cy, radius, color, thickness=2):
         """Draw a circle outline using midpoint algorithm."""
@@ -2208,8 +2276,7 @@ class Framebuffer:
 
     def fill_circle(self, cx, cy, radius, color):
         """Fill a solid circle."""
-        r, g, b = color
-        pixel = struct.pack('BBBB', b, g, r, 0)
+        pixel = self._pack_pixel(color)
         r2 = radius * radius
         for dy in range(-radius, radius + 1):
             py = cy + dy
@@ -2237,8 +2304,7 @@ class Framebuffer:
         then only check angles for those pixels. This avoids scanning
         the entire bounding box.
         """
-        r, g, b = color
-        pixel = struct.pack('BBBB', b, g, r, 0)
+        pixel = self._pack_pixel(color)
         buf = self.buf
 
         TWO_PI = 2 * math.pi
@@ -2312,8 +2378,7 @@ class Framebuffer:
         Returns the total width drawn (for centering calculations).
         Optimized: uses row-span batching instead of per-pixel set_pixel.
         """
-        r, g, b = color
-        pixel = struct.pack('BBBB', b, g, r, 0)
+        pixel = self._pack_pixel(color)
         buf = self.buf
         stride = FB_STRIDE
         bpp = FB_BPP
@@ -2384,9 +2449,26 @@ class Framebuffer:
         return w
 
     def flush(self):
-        """Write buffer to framebuffer device."""
-        os.lseek(self.fd, 0, os.SEEK_SET)
-        os.write(self.fd, bytes(self.buf))
+        """Write buffer to framebuffer device with partial-write handling."""
+        if self.fd < 0:
+            return
+        try:
+            os.lseek(self.fd, 0, os.SEEK_SET)
+            mv = memoryview(self.buf)
+            total = len(self.buf)
+            written = 0
+            while written < total:
+                try:
+                    n = os.write(self.fd, mv[written:])
+                    if n <= 0:
+                        break
+                    written += n
+                except OSError as e:
+                    if e.errno == errno.EINTR:
+                        continue
+                    break  # non-EINTR error, skip this frame
+        except OSError:
+            pass  # lseek failed, skip this frame
 
     def flush_rect(self, x, y, w, h):
         """Write only a rectangular region to framebuffer device.
@@ -2395,15 +2477,21 @@ class Framebuffer:
         and Python only needs to update the gear icon area without overwriting
         the camera frame.
         """
+        if self.fd < 0:
+            return
         x0 = max(0, x)
         y0 = max(0, y)
         x1 = min(FB_W, x + w)
         y1 = min(FB_H, y + h)
-        for row in range(y0, y1):
-            offset = row * FB_STRIDE + x0 * FB_BPP
-            length = (x1 - x0) * FB_BPP
-            os.lseek(self.fd, offset, os.SEEK_SET)
-            os.write(self.fd, bytes(self.buf[offset:offset + length]))
+        mv = memoryview(self.buf)
+        try:
+            for row in range(y0, y1):
+                offset = row * FB_STRIDE + x0 * FB_BPP
+                length = (x1 - x0) * FB_BPP
+                os.lseek(self.fd, offset, os.SEEK_SET)
+                os.write(self.fd, mv[offset:offset + length])
+        except OSError:
+            pass  # skip partial rect flush on error
 
 # ---------------------------------------------------------------------------
 # HUD rendering with caching
@@ -2424,12 +2512,6 @@ SIGN_R = 52
 SIGN_CX = FB_W - 65
 SIGN_CY = FB_H // 2 + 10
 
-# PiP camera preview area (must match C binary PIP_* constants)
-PIP_SIZE = 120
-PIP_MARGIN = 10
-PIP_X = FB_W - PIP_MARGIN - PIP_SIZE   # 350
-PIP_Y = FB_H - PIP_MARGIN - PIP_SIZE   # 350
-PIP_BORDER = (80, 85, 100)             # subtle gray border
 
 
 def _build_base_layer(fb, speed_limit=DEFAULT_SPEED_LIMIT):
@@ -2457,16 +2539,8 @@ def _build_base_layer(fb, speed_limit=DEFAULT_SPEED_LIMIT):
     limit_ty = SIGN_CY - limit_th // 2
     fb.draw_text(limit_str, limit_tx, limit_ty, COL_LIMIT_TEXT, limit_scale)
 
-    # Thin separator line above satellite info (shortened to avoid PiP area)
-    fb.fill_rect(20, FB_H - 55, PIP_X - 30, 1, COL_DIM)
-
-    # PiP camera border (1px frame around VO overlay area)
-    bx, by = PIP_X - 1, PIP_Y - 1
-    bw, bh = PIP_SIZE + 2, PIP_SIZE + 2
-    fb.fill_rect(bx, by, bw, 1, PIP_BORDER)           # top
-    fb.fill_rect(bx, by + bh - 1, bw, 1, PIP_BORDER)  # bottom
-    fb.fill_rect(bx, by, 1, bh, PIP_BORDER)            # left
-    fb.fill_rect(bx + bw - 1, by, 1, bh, PIP_BORDER)  # right
+    # Thin separator line above satellite info
+    fb.fill_rect(20, FB_H - 55, FB_W - 40, 1, COL_DIM)
 
     return bytearray(fb.buf)
 
@@ -2489,22 +2563,17 @@ class HUDState:
         self.camera_dist = -1  # meters to nearest camera, -1 = none
 
 
-def _draw_gear_icon(fb, cx, cy, color):
-    """Draw a small gear icon at (cx, cy) using basic primitives.
+def _draw_menu_icon(fb, cx, cy, color):
+    """Draw a hamburger menu icon (three horizontal lines).
 
-    ~20px diameter gear: center circle + 6 rectangular teeth.
-    Indicates the tap zone for opening settings overlay.
+    16px wide, three 2px-tall lines spaced 6px apart, centered at (cx, cy).
+    Universal 'open menu/settings' symbol, pixel-perfect on bitmap display.
     """
-    # Center hub
-    fb.fill_circle(cx, cy, 5, color)
-    # Inner hole (background color to create ring effect)
-    fb.fill_circle(cx, cy, 2, COL_BG)
-    # 6 teeth at 0/60/120/180/240/300 degrees (simplified as rects)
-    for angle_deg in range(0, 360, 60):
-        rad = math.radians(angle_deg)
-        tx = cx + int(8 * math.cos(rad))
-        ty = cy + int(8 * math.sin(rad))
-        fb.fill_rect(tx - 3, ty - 3, 6, 6, color)
+    lw, lh = 16, 2
+    x0 = cx - lw // 2
+    fb.fill_rect(x0, cy - 7, lw, lh, color)
+    fb.fill_rect(x0, cy - 1, lw, lh, color)
+    fb.fill_rect(x0, cy + 5, lw, lh, color)
 
 
 def render_hud(fb, gps, state=None, detect=None):
@@ -2625,13 +2694,13 @@ def render_hud(fb, gps, state=None, detect=None):
         hint_y = speed_y - GLYPH_H * hint_scale - 8
         fb.draw_text(hint_str, hint_x, hint_y, COL_DIM, hint_scale)
 
-    # --- Alert bar (bottom, shortened to avoid PiP overlap) ---
+    # --- Alert bar (bottom) ---
     show_alert = over_limit or camera
     if show_alert:
         bar_h = 44
         bar_y = FB_H - bar_h - 68
         bar_x = 24
-        bar_w = PIP_X - bar_x - 10  # stop before PiP area
+        bar_w = FB_W - bar_x * 2
 
         # Choose alert color and text based on situation
         if camera and over_limit:
@@ -2696,7 +2765,7 @@ def render_hud(fb, gps, state=None, detect=None):
     fb.fill_circle(dot_x, dot_y, 4, dot_color)
 
     # --- Settings gear icon (top-left tap zone indicator) ---
-    _draw_gear_icon(fb, 18, 18, COL_DIM)
+    _draw_menu_icon(fb, 18, 18, COL_DIM)
 
     fb.flush()
 
@@ -2707,6 +2776,15 @@ def render_hud(fb, gps, state=None, detect=None):
 def main():
     device = sys.argv[1] if len(sys.argv) > 1 else "/dev/ttyS4"
     baudrate = int(sys.argv[2]) if len(sys.argv) > 2 else 9600
+
+    # --- SIGTERM handler for graceful shutdown ---
+    _shutdown_requested = False
+
+    def _sigterm_handler(signum, frame):
+        nonlocal _shutdown_requested
+        _shutdown_requested = True
+
+    signal.signal(signal.SIGTERM, _sigterm_handler)
 
     print(f"HUD Live - GPS: {device} @ {baudrate} baud")
     print(f"Framebuffer: {FB_DEV} ({FB_W}x{FB_H})")
@@ -2766,20 +2844,32 @@ def main():
     print("Press Ctrl+C to stop\n")
 
     fb = Framebuffer(FB_DEV)
-    gps_fd = open_serial(device, baudrate)
+    if not fb.available:
+        print("[FB] FATAL: framebuffer not available, cannot render HUD")
+        # Still try to run (process watchdog will restart us)
+
+    gps_fd = open_serial_retry(device, baudrate)
     gps = GPSState()
     detect = DetectionState()
-    write_npu_enable_ipc(True)  # ensure C thread starts with NPU enabled
-    write_display_mode_ipc("hud")  # ensure C starts in HUD mode (no camera render)
-    nmea_buf = b""
-    hud_state = HUDState()
 
-    # Display mode: "hud" (default) or "cam" (full-screen camera from C binary)
+    # Read initial state from config (respects persisted settings)
+    npu_initial = True
     display_mode = "hud"
     if config:
+        npu_initial = bool(config.get_int("settings", "npu_enabled"))
         display_mode = config.get_str("settings", "display_mode")
-        if display_mode == "cam":
-            write_display_mode_ipc("cam")
+        saved_region = config.get_str("settings", "region")
+        if saved_region and saved_region != region_mgr.region:
+            region_mgr.region = saved_region
+            speed_db, speed_fusion = load_speed_db()
+    write_npu_enable_ipc(npu_initial)
+    detect.npu_enabled = npu_initial
+    write_display_mode_ipc(display_mode)
+    print(f"Initial state: NPU={'ON' if npu_initial else 'OFF'}, "
+          f"display={display_mode}, region={region_mgr.region}")
+
+    nmea_buf = b""
+    hud_state = HUDState()
 
     # --- Touch input + Settings UI (optional, graceful fallback) ---
     touch = None
@@ -2847,33 +2937,62 @@ def main():
     except OSError:
         pass
 
+    settings_close_time = 0  # debounce: prevent accidental re-open
+
     try:
-        while True:
+        while not _shutdown_requested:
+          try:
             # --- Poll touch events (non-blocking) ---
             if touch and settings_ui:
                 was_active = settings_ui.active
-                for ev in touch.poll():
-                    if settings_ui.active:
-                        settings_ui.handle_touch(ev)
-                    else:
-                        # Tap top-left corner (0,0)-(80,80) -> open settings
-                        if (ev.gesture == "tap"
-                                and ev.x < 80 and ev.y < 80):
-                            settings_ui.activate()
-                # Exiting settings: restore appropriate display
+                try:
+                    for ev in touch.poll():
+                        if settings_ui.active:
+                            try:
+                                settings_ui.handle_touch(ev)
+                            except Exception as e:
+                                print(f"\n[SETTINGS] handle_touch error: {e}")
+                        else:
+                            # Debounce: skip taps shortly after settings closed
+                            if settings_close_time and (
+                                    time.time() - settings_close_time < 0.5):
+                                continue
+                            # Tap top-left corner (0,0)-(80,80) -> open settings
+                            if (ev.gesture == "tap"
+                                    and ev.x < 80 and ev.y < 80):
+                                settings_ui.activate()
+                except Exception as e:
+                    print(f"\n[TOUCH] poll error: {e}")
+                # Settings inactivity timeout (auto-close if touch dies)
+                if settings_ui.active and settings_ui.check_timeout():
+                    was_active = True  # force display restore below
+
+                # Exiting settings: immediately restore display
                 if was_active and not settings_ui.active:
-                    # Re-read display_mode (may have changed in settings)
+                    print("[settings] closed, restoring display")
+                    settings_close_time = time.time()
                     if config:
                         display_mode = config.get_str("settings", "display_mode")
                     if display_mode == "cam":
-                        # CAM: redraw gear icon in reserved corner
-                        # C binary resumes camera rendering elsewhere
-                        fb.fill_rect(0, 0, 40, 40, COL_BG)
-                        _draw_gear_icon(fb, 18, 18, COL_DIM)
-                        fb.flush_rect(0, 0, 40, 40)
+                        # Full clear removes settings UI; C binary
+                        # resumes camera on the next frame.
+                        fb.clear(COL_BG)
+                        _draw_menu_icon(fb, 18, 18, COL_DIM)
+                        fb.flush()
                     else:
-                        # HUD: force full redraw
+                        # Immediate HUD render (don't wait for GPS cycle)
                         hud_state.base_layer = None
+                        render_hud(fb, gps, hud_state, detect)
+
+            # --- GPS read (skip if GPS unavailable) ---
+            if gps_fd < 0:
+                time.sleep(0.1)
+                detect.poll()
+                # Still render HUD without GPS data
+                if not (settings_ui and settings_ui.active):
+                    if display_mode != "cam":
+                        render_hud(fb, gps, hud_state, detect)
+                continue
 
             try:
                 data = os.read(gps_fd, 256)
@@ -2885,6 +3004,8 @@ def main():
                 continue
 
             nmea_buf += data
+            if len(nmea_buf) > 4096:
+                nmea_buf = nmea_buf[-2048:]
             rmc_seen = False
 
             while b"\n" in nmea_buf:
@@ -2966,7 +3087,7 @@ def main():
                     # CAM mode: C binary renders full-screen camera.
                     # Only draw gear icon in the reserved top-left corner.
                     fb.fill_rect(0, 0, 40, 40, COL_BG)
-                    _draw_gear_icon(fb, 18, 18, COL_DIM)
+                    _draw_menu_icon(fb, 18, 18, COL_DIM)
                     fb.flush_rect(0, 0, 40, 40)
                 else:
                     render_hud(fb, gps, hud_state, detect)
@@ -2984,17 +3105,36 @@ def main():
                       f"SAT:{gps.satellites}{cam_info}{pos}",
                       end="", flush=True)
 
+          except KeyboardInterrupt:
+            raise  # propagate to outer handler
+          except Exception as e:
+            # Catch-all: log and continue instead of crashing
+            print(f"\n[ERROR] Main loop exception: {e}", flush=True)
+            time.sleep(1)  # prevent error storm
+
     except KeyboardInterrupt:
         print("\n\nShutting down HUD...")
     finally:
+        print("\n[SHUTDOWN] Cleaning up...")
         # Close touch input
         if touch:
-            touch.close()
+            try:
+                touch.close()
+            except Exception:
+                pass
         # Clear screen to black on exit
-        fb.clear((0, 0, 0))
-        fb.flush()
-        fb.close()
-        os.close(gps_fd)
+        if fb.available:
+            try:
+                fb.clear((0, 0, 0))
+                fb.flush()
+                fb.close()
+            except Exception:
+                pass
+        if gps_fd >= 0:
+            try:
+                os.close(gps_fd)
+            except OSError:
+                pass
         # Clean up IPC files
         for ipc_f in (SPEED_IPC_FILE, DISPLAY_MODE_IPC, "/tmp/ai_hud_ready"):
             try:

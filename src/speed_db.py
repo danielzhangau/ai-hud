@@ -29,6 +29,7 @@ Binary file format (both databases share the same layout):
 import os
 import struct
 import math
+import time as _time
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -50,7 +51,6 @@ GRID_RES = 0.005
 
 # Camera alert radius (meters)
 CAMERA_ALERT_RADIUS = 800
-CAMERA_WARN_RADIUS = 400
 
 # Approximate meters-per-degree at Australian latitudes (~-28 to -38)
 _M_PER_DEG_LAT = 111_320.0
@@ -271,14 +271,20 @@ class SpeedDB:
         results.sort(key=lambda x: x[0])
         return results
 
-    def query(self, lat, lon, heading=None):
+    def query(self, lat, lon, heading=None, camera_radius_m=None):
         """Combined query returning speed limit and camera warnings.
+
+        Args:
+            lat, lon: GPS coordinates
+            heading: travel direction (optional)
+            camera_radius_m: override camera search radius (default: module constant)
 
         Returns:
             QueryResult with .speed_limit, .cameras, .camera_ahead, .camera_dist
         """
         speed = self.query_speed_limit(lat, lon, heading)
-        cameras = self.query_cameras(lat, lon, heading)
+        radius = camera_radius_m if camera_radius_m is not None else CAMERA_ALERT_RADIUS
+        cameras = self.query_cameras(lat, lon, heading, radius_m=radius)
 
         camera_ahead = len(cameras) > 0
         camera_dist = cameras[0][0] if cameras else -1
@@ -326,8 +332,26 @@ class SpeedFusion:
         limit = fusion.update(db_limit, npu_limit, npu_confidence)
     """
 
-    def __init__(self, default_limit=100):
+    def __init__(self, default_limit=100,
+                 confidence_min=None,
+                 confidence_no_db=None,
+                 vote_required=None,
+                 override_timeout=None,
+                 camera_alert_radius=None):
         self.default = default_limit
+
+        # Configurable thresholds (fall back to module-level defaults)
+        self.confidence_min = (confidence_min if confidence_min is not None
+                               else NPU_CONFIDENCE_MIN)
+        self.confidence_no_db = (confidence_no_db if confidence_no_db is not None
+                                 else NPU_CONFIDENCE_NO_DB)
+        self.vote_required = (vote_required if vote_required is not None
+                              else NPU_VOTE_REQUIRED)
+        self.override_timeout = (override_timeout if override_timeout is not None
+                                 else NPU_OVERRIDE_TIMEOUT)
+        self.camera_alert_radius = (camera_alert_radius
+                                    if camera_alert_radius is not None
+                                    else CAMERA_ALERT_RADIUS)
 
         # NPU voting state
         self._npu_candidate = 0       # value NPU is proposing
@@ -352,7 +376,6 @@ class SpeedFusion:
         Returns:
             int: effective speed limit in km/h
         """
-        import time as _time
         if now is None:
             now = _time.time()
 
@@ -366,8 +389,8 @@ class SpeedFusion:
             self._last_db_limit = db_limit
 
         # --- NPU voting logic ---
-        conf_threshold = (NPU_CONFIDENCE_MIN if db_limit > 0
-                          else NPU_CONFIDENCE_NO_DB)
+        conf_threshold = (self.confidence_min if db_limit > 0
+                          else self.confidence_no_db)
 
         npu_active = npu_limit > 0 and npu_confidence >= conf_threshold
 
@@ -383,7 +406,7 @@ class SpeedFusion:
         # Only accept/refresh override when NPU is ACTIVELY detecting
         # this frame. Stale votes cannot refresh the timeout.
         npu_accepted = False
-        if (npu_active and self._npu_votes >= NPU_VOTE_REQUIRED):
+        if (npu_active and self._npu_votes >= self.vote_required):
             candidate = self._npu_candidate
 
             if db_limit > 0:
@@ -404,7 +427,7 @@ class SpeedFusion:
 
         # --- Check NPU override timeout ---
         if (self._npu_override > 0 and not npu_accepted
-                and now - self._npu_override_time > NPU_OVERRIDE_TIMEOUT):
+                and now - self._npu_override_time > self.override_timeout):
             # NPU hasn't re-confirmed within timeout -- revert
             self._npu_override = 0
             self._npu_votes = 0

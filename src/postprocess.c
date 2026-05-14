@@ -189,6 +189,23 @@ static void swap_detections(raw_detection_t *a, raw_detection_t *b) {
     *b = tmp;
 }
 
+/*
+ * Median-of-three pivot selection to avoid O(n^2) worst case.
+ * Moves the median to arr[high] for use as pivot.
+ */
+static void median_of_three(raw_detection_t *arr, int low, int high) {
+    int mid = low + (high - low) / 2;
+    /* Sort the three elements: low, mid, high (descending by score) */
+    if (arr[low].score < arr[mid].score)
+        swap_detections(&arr[low], &arr[mid]);
+    if (arr[low].score < arr[high].score)
+        swap_detections(&arr[low], &arr[high]);
+    if (arr[mid].score < arr[high].score)
+        swap_detections(&arr[mid], &arr[high]);
+    /* Now arr[low] >= arr[mid] >= arr[high]; use mid as pivot */
+    swap_detections(&arr[mid], &arr[high]);
+}
+
 static int partition(raw_detection_t *arr, int low, int high) {
     float pivot = arr[high].score;
     int i = low - 1;
@@ -202,11 +219,28 @@ static int partition(raw_detection_t *arr, int low, int high) {
     return i + 1;
 }
 
+/*
+ * Iterative quicksort with median-of-three pivot and tail-call elimination.
+ * Guarantees O(log n) stack depth even in worst case by always recursing
+ * into the smaller partition and looping on the larger one.
+ * Critical for embedded ARM with limited stack (RV1106 default 8KB).
+ */
 static void quicksort(raw_detection_t *arr, int low, int high) {
-    if (low < high) {
+    while (low < high) {
+        /* Use median-of-three when partition is large enough */
+        if (high - low >= 2)
+            median_of_three(arr, low, high);
+
         int pi = partition(arr, low, high);
-        quicksort(arr, low, pi - 1);
-        quicksort(arr, pi + 1, high);
+
+        /* Recurse into smaller partition, loop on larger */
+        if (pi - low < high - pi) {
+            quicksort(arr, low, pi - 1);
+            low = pi + 1;  /* tail-call elimination */
+        } else {
+            quicksort(arr, pi + 1, high);
+            high = pi - 1; /* tail-call elimination */
+        }
     }
 }
 
@@ -226,6 +260,13 @@ static int nms(raw_detection_t *dets, int count, float nms_threshold,
      * memset replaces calloc's zero-initialization.
      */
     static int suppressed[MAX_RAW_DETECTIONS];
+
+    /* Bounds guard: clamp count to buffer capacity */
+    if (count > MAX_RAW_DETECTIONS)
+        count = MAX_RAW_DETECTIONS;
+    if (count <= 0)
+        return 0;
+
     memset(suppressed, 0, count * sizeof(int));
 
     int keep_count = 0;

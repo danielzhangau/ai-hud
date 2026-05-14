@@ -23,7 +23,6 @@ Usage:
     touch.close()
 """
 
-import errno
 import fcntl
 import os
 import time
@@ -41,7 +40,6 @@ _I2C_BUS = "/dev/i2c-3"
 _GPIO_SYSFS = "/sys/class/gpio"
 _GPIO_INT = 3     # GPIO0_A3 = IRQ pin (controls I2C address on reset)
 _GPIO_RST = 4     # GPIO0_A4 = RESET pin
-_GOODIX_UNBIND = "/sys/bus/i2c/drivers/Goodix-TS/unbind"
 
 # GT911 registers (16-bit big-endian)
 _REG_PRODUCT_ID = bytes([0x81, 0x40])
@@ -67,6 +65,15 @@ _SWIPE_MIN_DISPLACEMENT = 50  # pixels
 
 # Polling interval (GT911 reports at ~60Hz, we don't need that fast)
 _POLL_INTERVAL = 0.05  # 50ms = 20Hz max
+_I2C_RESET_THRESHOLD = 10  # consecutive OSErrors before hardware reset
+
+# GT911 stall recovery thresholds.
+# GT911 scans at ~60Hz; even with no touch, buffer_ready toggles every
+# ~17ms.  If buffer_ready stays 0 for STALL_DETECT_S, the firmware has
+# hung and we do a hardware reset.  STALL_COOLDOWN_S prevents rapid
+# consecutive resets which destabilize GT911.
+_STALL_DETECT_S = 2.0    # seconds of no buffer_ready before hw reset
+_STALL_COOLDOWN_S = 30.0  # minimum interval between resets
 
 
 # ---------------------------------------------------------------------------
@@ -110,9 +117,9 @@ class TouchInput:
 
         bus = i2c_bus or _I2C_BUS
 
-        # Unbind Goodix kernel driver (its reset sequence kills GT911)
-        # and perform hardware reset with correct address selection.
-        self._unbind_and_reset()
+        # Hardware reset GT911 with correct address selection (0x5D).
+        # Goodix kernel driver is disabled in device tree.
+        self._hw_reset()
 
         try:
             self._fd = os.open(bus, os.O_RDWR)
@@ -155,6 +162,21 @@ class TouchInput:
         self._cur_x = 0
         self._cur_y = 0
 
+        # I2C error recovery
+        self._i2c_errors = 0
+
+        # Stall detection: GT911 firmware bug can cause buffer_ready to
+        # stay 0 indefinitely while I2C still works.  Track last
+        # buffer_ready=1 time and trigger hw reset after _STALL_DETECT_S.
+        self._last_br1_time = time.time()
+        self._last_reset_time = 0.0
+
+        # Non-blocking reset state machine (for runtime recovery).
+        # _reset_phase: 0=idle, 1=RST low wait, 2=RST high wait,
+        #               3=calibration wait, 4=done (re-init I2C)
+        self._reset_phase = 0
+        self._reset_phase_time = 0.0
+
     @property
     def available(self):
         """Whether GT911 was successfully detected."""
@@ -165,14 +187,22 @@ class TouchInput:
 
         Should be called from main loop. Returns list of completed gestures.
         Rate-limited to avoid excessive I2C traffic.
+
+        During a non-blocking hardware reset (stall/error recovery), this
+        method advances the GPIO state machine in ~50ms increments instead
+        of blocking the main loop for 660ms.
         """
-        if not self.available:
+        if not self.available and self._reset_phase == 0:
             return []
 
         now = time.time()
         if now - self._last_poll < _POLL_INTERVAL:
             return []
         self._last_poll = now
+
+        # ---- Non-blocking reset state machine (runtime recovery) ----
+        if self._reset_phase > 0:
+            return self._advance_reset(now)
 
         gestures = []
 
@@ -186,7 +216,19 @@ class TouchInput:
             touch_count = status_byte & 0x0F
 
             if not buffer_ready:
+                # GT911 stall detection: firmware scans at ~60Hz, so
+                # 2s of continuous buffer_ready=0 is a definitive stall.
+                stall_dur = now - self._last_br1_time
+                if (stall_dur > _STALL_DETECT_S
+                        and now - self._last_reset_time > _STALL_COOLDOWN_S):
+                    print(f"[touch] GT911 stall ({stall_dur:.1f}s),"
+                          " starting non-blocking hw reset")
+                    self._last_reset_time = now
+                    self._touch_down = False
+                    self._begin_async_reset(now)
                 return []
+
+            self._last_br1_time = now
 
             if touch_count > 0 and touch_count <= 5:
                 # Read first touch point (we only use single-touch)
@@ -217,35 +259,84 @@ class TouchInput:
                 # Finger lifted
                 gesture = self._resolve_gesture()
                 if gesture:
+                    print(f"[touch] {gesture}")
                     gestures.append(gesture)
                 self._touch_down = False
 
             # Clear status register (must write 0 to acknowledge)
             os.write(self._fd, _REG_CLEAR_STATUS + b"\x00")
 
-        except OSError as e:
-            if e.errno != errno.EAGAIN:
-                # I2C error -- GT911 may have reset, skip this cycle
-                pass
+        except OSError:
+            self._i2c_errors += 1
+            if self._i2c_errors >= _I2C_RESET_THRESHOLD:
+                self._i2c_errors = 0
+                self._touch_down = False
+                print("[touch] GT911 I2C errors -- starting non-blocking"
+                      " hw reset")
+                self._begin_async_reset(now)
+            return []
 
+        # Successful read -- reset error counter
+        self._i2c_errors = 0
         return gestures
 
     def close(self):
-        """Close I2C file descriptor."""
+        """Close I2C file descriptor and release GPIO pins."""
         if self._fd >= 0:
             try:
                 os.close(self._fd)
             except OSError:
                 pass
             self._fd = -1
+        # Unexport GPIOs only on final shutdown
+        if TouchInput._gpio_ready:
+            for gpio in (_GPIO_INT, _GPIO_RST):
+                try:
+                    with open(f"{_GPIO_SYSFS}/unexport", "w") as f:
+                        f.write(str(gpio))
+                except OSError:
+                    pass
+            TouchInput._gpio_ready = False
 
     # -----------------------------------------------------------------------
     # Internal
     # -----------------------------------------------------------------------
 
-    @staticmethod
-    def _unbind_and_reset():
-        """Hardware-reset GT911 via GPIO to establish I2C communication.
+    _gpio_ready = False  # class-level: GPIOs exported once
+
+    @classmethod
+    def _ensure_gpio(cls):
+        """Export GT911 GPIO pins once (idempotent).
+
+        Keeps RST HIGH and INT as input after export so GT911 stays
+        running.  Pins remain exported for the process lifetime to
+        avoid unexport glitches that destabilize GT911.
+        """
+        if cls._gpio_ready:
+            return
+        for gpio in (_GPIO_INT, _GPIO_RST):
+            try:
+                with open(f"{_GPIO_SYSFS}/export", "w") as f:
+                    f.write(str(gpio))
+            except OSError:
+                pass  # already exported
+        try:
+            # RST = output HIGH (keep GT911 running)
+            with open(f"{_GPIO_SYSFS}/gpio{_GPIO_RST}/direction", "w") as f:
+                f.write("out")
+            with open(f"{_GPIO_SYSFS}/gpio{_GPIO_RST}/value", "w") as f:
+                f.write("1")
+            # INT = input (normal IRQ)
+            with open(f"{_GPIO_SYSFS}/gpio{_GPIO_INT}/direction", "w") as f:
+                f.write("in")
+        except OSError as e:
+            print(f"[touch] WARNING: GPIO init failed: {e}")
+            return
+        cls._gpio_ready = True
+
+    @classmethod
+    def _hw_reset(cls):
+        """Hardware-reset GT911 via GPIO.
 
         The Goodix-TS kernel driver is disabled in device tree to prevent
         its broken reset sequence.  This method performs a proper GT911
@@ -254,50 +345,108 @@ class TouchInput:
         GT911 address selection protocol:
           - INT pin LOW  during RESET release -> address 0x5D
           - INT pin HIGH during RESET release -> address 0x14
+
+        GPIOs are NOT unexported -- they stay exported to avoid pin
+        glitches that would cause uncontrolled GT911 resets.
         """
-        # 1. Export GPIO pins
-        for gpio in (_GPIO_INT, _GPIO_RST):
-            try:
-                with open(f"{_GPIO_SYSFS}/export", "w") as f:
-                    f.write(str(gpio))
-            except OSError:
-                pass  # already exported
+        cls._ensure_gpio()
 
         try:
-            # 3. Set INT=output LOW (selects address 0x5D)
+            # 1. Set INT=output LOW (selects address 0x5D)
             with open(f"{_GPIO_SYSFS}/gpio{_GPIO_INT}/direction", "w") as f:
                 f.write("out")
             with open(f"{_GPIO_SYSFS}/gpio{_GPIO_INT}/value", "w") as f:
                 f.write("0")
 
-            # 4. Pull RESET low for 100ms
-            with open(f"{_GPIO_SYSFS}/gpio{_GPIO_RST}/direction", "w") as f:
-                f.write("out")
+            # 2. Pull RESET low for 100ms
             with open(f"{_GPIO_SYSFS}/gpio{_GPIO_RST}/value", "w") as f:
                 f.write("0")
             time.sleep(0.1)
 
-            # 5. Release RESET while INT is still LOW
+            # 3. Release RESET while INT is still LOW
             with open(f"{_GPIO_SYSFS}/gpio{_GPIO_RST}/value", "w") as f:
                 f.write("1")
             time.sleep(0.06)
 
-            # 6. Set INT back to input (normal IRQ operation)
+            # 4. Set INT back to input (normal IRQ operation)
             with open(f"{_GPIO_SYSFS}/gpio{_GPIO_INT}/direction", "w") as f:
                 f.write("in")
-            time.sleep(0.2)
+            time.sleep(0.5)  # 500ms: GT911 needs time for touch calibration
 
             print("[touch] GT911 hardware reset complete")
         except OSError as e:
             print(f"[touch] WARNING: GPIO reset failed: {e}")
-        finally:
-            # 7. Unexport GPIOs
-            for gpio in (_GPIO_INT, _GPIO_RST):
+
+    def _begin_async_reset(self, now):
+        """Start a non-blocking GT911 hardware reset.
+
+        Instead of blocking 660ms in the main loop, the reset is split
+        into phases advanced by _advance_reset() on each poll() call:
+          Phase 1: INT=LOW, RST=LOW  -> wait 100ms
+          Phase 2: RST=HIGH          -> wait 60ms
+          Phase 3: INT=input         -> wait 500ms (calibration)
+          Phase 4: Re-init I2C and verify
+        """
+        self._ensure_gpio()
+        try:
+            # Phase 1: INT=output LOW, RST=LOW
+            with open(f"{_GPIO_SYSFS}/gpio{_GPIO_INT}/direction", "w") as f:
+                f.write("out")
+            with open(f"{_GPIO_SYSFS}/gpio{_GPIO_INT}/value", "w") as f:
+                f.write("0")
+            with open(f"{_GPIO_SYSFS}/gpio{_GPIO_RST}/value", "w") as f:
+                f.write("0")
+            self._reset_phase = 1
+            self._reset_phase_time = now
+        except OSError as e:
+            print(f"[touch] WARNING: async reset start failed: {e}")
+            self._reset_phase = 0
+
+    def _advance_reset(self, now):
+        """Advance the non-blocking reset state machine. Returns []."""
+        elapsed = now - self._reset_phase_time
+
+        try:
+            if self._reset_phase == 1 and elapsed >= 0.1:
+                # Phase 2: Release RESET (INT still LOW)
+                with open(f"{_GPIO_SYSFS}/gpio{_GPIO_RST}/value", "w") as f:
+                    f.write("1")
+                self._reset_phase = 2
+                self._reset_phase_time = now
+
+            elif self._reset_phase == 2 and elapsed >= 0.06:
+                # Phase 3: Set INT back to input
+                with open(f"{_GPIO_SYSFS}/gpio{_GPIO_INT}/direction",
+                          "w") as f:
+                    f.write("in")
+                self._reset_phase = 3
+                self._reset_phase_time = now
+
+            elif self._reset_phase == 3 and elapsed >= 0.5:
+                # Phase 4: Calibration done, verify communication
+                self._reset_phase = 0
+                self._last_br1_time = now
+                print("[touch] GT911 non-blocking reset complete")
+
+                # Verify GT911 responds
                 try:
-                    with open(f"{_GPIO_SYSFS}/unexport", "w") as f:
-                        f.write(str(gpio))
+                    fcntl.ioctl(self._fd, I2C_SLAVE, self._addr)
+                    os.write(self._fd, _REG_PRODUCT_ID)
+                    pid = os.read(self._fd, 4)
+                    if pid[:3] == b"911":
+                        print("[touch] GT911 recovered successfully")
+                        return []
                 except OSError:
                     pass
+                print("[touch] GT911 recovery failed -- touch disabled")
+                self._addr = 0
+
+        except OSError as e:
+            print(f"[touch] WARNING: async reset phase"
+                  f" {self._reset_phase} failed: {e}")
+            self._reset_phase = 0
+
+        return []
 
     def _read_resolution(self):
         """Read GT911 config register to get touch panel resolution."""

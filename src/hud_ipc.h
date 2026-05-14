@@ -58,6 +58,11 @@ static inline int hud_ipc_write(int speed_limit, int camera, float confidence)
     fprintf(fp, "camera=%d\n", camera);
     fprintf(fp, "confidence=%.2f\n", confidence);
     fprintf(fp, "timestamp=%ld\n", (long)time(NULL));
+
+    /* Flush user-space buffer before close to ensure data hits the
+     * filesystem before the subsequent rename().  On tmpfs this is
+     * mostly a no-op, but prevents data loss if backed by real storage. */
+    fflush(fp);
     fclose(fp);
 
     /* Atomic replace -- reader never sees partial content */

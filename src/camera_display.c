@@ -474,6 +474,7 @@ static void *pip_render_thread(void *arg) {
     int frame_count = 0;
     int mode_check_counter = 0;
     int cam_mode = 0;
+    int pip_hidden = 0;
 
     while (g_running) {
         int ret = RK_MPI_VPSS_GetChnFrame(VPSS_GRP_ID, VPSS_CHN_DISPLAY,
@@ -485,15 +486,19 @@ static void *pip_render_thread(void *arg) {
         if (++mode_check_counter >= 15) {
             mode_check_counter = 0;
             cam_mode = read_display_mode_cam();
+            pip_hidden = (access(PIP_HIDE_IPC, F_OK) == 0);
         }
 
         void *vaddr = RK_MPI_MB_Handle2VirAddr(frame.stVFrame.pMbBlk);
-        if (vaddr && cam_mode) {
-            /* CAM mode: full-screen camera, skip if settings overlay active */
-            if (access(PIP_HIDE_IPC, F_OK) != 0) {
+        if (vaddr && cam_mode && !pip_hidden) {
+            /* Validate frame dimensions match expectations before pixel access.
+             * Prevents buffer overflow if VPSS outputs unexpected resolution. */
+            if (frame.stVFrame.u32Width  == DISPLAY_WIDTH &&
+                frame.stVFrame.u32Height == DISPLAY_HEIGHT &&
+                g_fb_map != NULL) {
                 nv12_480_to_fullscreen_xrgb((const uint8_t *)vaddr, g_fb_map);
+                frame_count++;
             }
-            frame_count++;
         }
         /* HUD mode: no camera rendering to framebuffer */
 

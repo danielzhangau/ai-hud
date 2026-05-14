@@ -1,0 +1,34 @@
+#!/bin/sh
+# S01_ai_hud_splash -- Show AI-HUD splash ASAP, hide kernel DRM logo.
+#
+# Runs at S01 level (earliest init.d) to replace the kernel's built-in
+# Luckfox DRM boot logo with our AI-HUD branding.
+#
+# Strategy:
+#   1. Kill backlight immediately (hide whatever kernel DRM rendered)
+#   2. Write AI-HUD splash to framebuffer
+#   3. Restore backlight (user sees AI-HUD as first boot screen)
+#
+# Device: Luckfox Pico Ultra (RV1106G3), 480x480 DPI, /dev/fb0 XRGB8888
+
+BL="/sys/class/backlight/backlight/brightness"
+FB="/dev/fb0"
+SPLASH="/root/splash_raw.bin"
+
+case "$1" in
+start)
+    # Only proceed if framebuffer and splash exist
+    [ -e "$FB" ] && [ -f "$SPLASH" ] || exit 0
+
+    # 1. Kill backlight to hide kernel DRM logo
+    [ -f "$BL" ] && echo 0 > "$BL"
+
+    # 2. Write AI-HUD splash to framebuffer
+    cat "$SPLASH" > "$FB"
+
+    # 3. Restore backlight -- user sees AI-HUD immediately
+    [ -f "$BL" ] && echo 255 > "$BL"
+    ;;
+esac
+
+exit 0

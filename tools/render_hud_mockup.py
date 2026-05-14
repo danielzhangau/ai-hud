@@ -2,13 +2,13 @@
 """Render HUD mockup images for 480x480 canvas.
 
 Generates PNG images showing the HUD display design,
-matching the actual hud_live.py rendering layout.
+matching the actual hud_live.py rendering layout (post-PiP removal).
 
-Output:
-  docs/hud_mockup_normal.png   -- normal driving
-  docs/hud_mockup_over.png     -- over speed limit
-  docs/hud_mockup_camera.png   -- camera ahead + over limit
-  docs/hud_mockup_cam_ok.png   -- camera ahead, under limit
+Output (mockups/ directory):
+  hud_1_normal.png          -- normal driving, under limit
+  hud_2_speeding.png        -- over speed limit
+  hud_3_camera.png          -- camera ahead, under limit
+  hud_4_camera_speeding.png -- camera ahead + over limit
 
 Usage:
   python tools/render_hud_mockup.py
@@ -37,24 +37,20 @@ SIGN_R = 52
 SIGN_CX = FB_W - 65
 SIGN_CY = FB_H // 2 + 10
 
-PIP_SIZE = 120
-PIP_MARGIN = 10
-PIP_X = FB_W - PIP_MARGIN - PIP_SIZE
-PIP_Y = FB_H - PIP_MARGIN - PIP_SIZE
-
-# Colors
-COL_BG = (12, 12, 18)
-COL_WHITE = (255, 255, 255)
-COL_RED = (255, 60, 60)
-COL_GREEN = (50, 220, 80)
-COL_DIM = (80, 80, 100)
-COL_ARC_BLUE = (40, 140, 255)
+# Colors (match hud_live.py dark theme)
+COL_BG = (8, 10, 15)
+COL_WHITE = (245, 248, 255)
+COL_RED = (255, 55, 60)
+COL_GREEN = (50, 220, 120)
+COL_DIM = (55, 60, 75)
+COL_ARC_BLUE = (60, 140, 255)
 COL_ARC_RED = (255, 55, 60)
-COL_GAUGE_BG = (35, 35, 50)
-COL_LIMIT_RING = (220, 30, 30)
-COL_LIMIT_BG = (240, 240, 245)
+COL_GAUGE_BG = (30, 34, 45)
+COL_LIMIT_RING = (215, 40, 40)
+COL_LIMIT_BG = (252, 252, 255)
 COL_LIMIT_TEXT = (20, 20, 25)
 COL_AMBER = (255, 185, 35)
+COL_GEAR = (55, 60, 75)
 
 # ---------------------------------------------------------------------------
 # Font helpers
@@ -88,11 +84,8 @@ def draw_thick_arc(draw, cx, cy, r, start_deg, end_deg, color, width=10):
 
 def draw_speed_sign(draw, cx, cy, r, limit, fonts):
     """Draw the red-ring speed limit sign."""
-    # Red ring
     draw.ellipse([cx-r, cy-r, cx+r, cy+r], fill=COL_LIMIT_RING)
-    # White inner
     draw.ellipse([cx-r+5, cy-r+5, cx+r-5, cy+r-5], fill=COL_LIMIT_BG)
-    # Limit number
     text = str(limit)
     font = fonts['limit']
     bbox = draw.textbbox((0, 0), text, font=font)
@@ -101,37 +94,26 @@ def draw_speed_sign(draw, cx, cy, r, limit, fonts):
               text, fill=COL_LIMIT_TEXT, font=font)
 
 
-def draw_pip_placeholder(draw, x, y, size):
-    """Draw PiP camera view placeholder."""
-    # Border
-    draw.rectangle([x-1, y-1, x+size+1, y+size+1], outline=(60, 60, 80), width=2)
-    # Dark fill simulating camera view
-    draw.rectangle([x, y, x+size, y+size], fill=(20, 25, 30))
-    # Road-like lines to simulate camera feed
-    for i in range(3):
-        ly = y + 40 + i * 25
-        draw.line([(x+10, ly), (x+size-10, ly)], fill=(40, 50, 55), width=1)
-    # Car-like shapes
-    draw.rectangle([x+35, y+50, x+55, y+65], outline=(60, 80, 60), width=1)
-    draw.rectangle([x+70, y+70, x+90, y+85], outline=(60, 80, 60), width=1)
-    # "LIVE" label
-    font_sm = get_mono_font(10)
-    draw.text((x+4, y+4), "LIVE", fill=(200, 50, 50), font=font_sm)
+def draw_menu_icon(draw, cx, cy, color):
+    """Draw a hamburger menu icon (three horizontal lines)."""
+    lw, lh = 16, 2
+    x0 = cx - lw // 2
+    draw.rectangle([x0, cy-8, x0+lw, cy-6], fill=color)
+    draw.rectangle([x0, cy-2, x0+lw, cy], fill=color)
+    draw.rectangle([x0, cy+4, x0+lw, cy+6], fill=color)
 
 
-def draw_alert_bar(draw, text, color, fonts, bar_x=24, bar_w=None):
-    """Draw the alert bar at the bottom."""
-    if bar_w is None:
-        bar_w = PIP_X - bar_x - 10
+def draw_alert_bar(draw, text, color, fonts):
+    """Draw the full-width alert bar at the bottom."""
+    bar_x = 24
+    bar_w = FB_W - bar_x * 2
     bar_h = 44
     bar_y = FB_H - bar_h - 68
 
     bg = (color[0]//6, color[1]//6, color[2]//6)
     draw.rectangle([bar_x, bar_y, bar_x+bar_w, bar_y+bar_h], fill=bg)
-    # Border
     draw.rectangle([bar_x, bar_y, bar_x+bar_w, bar_y+bar_h],
                    outline=color, width=2)
-    # Text centered
     font = fonts['alert']
     bbox = draw.textbbox((0, 0), text, font=font)
     tw, th = bbox[2] - bbox[0], bbox[3] - bbox[1]
@@ -146,7 +128,8 @@ def draw_camera_badge(draw, text, color, fonts):
     badge_x = ARC_CX - badge_w // 2
     badge_y = 82
     bg = (color[0]//5, color[1]//5, color[2]//5)
-    draw.rectangle([badge_x, badge_y, badge_x+badge_w, badge_y+badge_h], fill=bg)
+    draw.rectangle([badge_x, badge_y, badge_x+badge_w, badge_y+badge_h],
+                   fill=bg)
     draw.rectangle([badge_x, badge_y, badge_x+badge_w, badge_y+badge_h],
                    outline=color, width=2)
     font = fonts['badge']
@@ -168,7 +151,6 @@ def render_hud(speed, limit, over_limit, camera_ahead,
     img = Image.new('RGB', (FB_W, FB_H), COL_BG)
     draw = ImageDraw.Draw(img)
 
-    # Load fonts
     fonts = {
         'speed': get_mono_font(120),
         'limit': get_mono_font(36),
@@ -176,15 +158,15 @@ def render_hud(speed, limit, over_limit, camera_ahead,
         'sat': get_mono_font(14),
         'alert': get_mono_font(18),
         'badge': get_mono_font(16),
-        'hint': get_mono_font(12),
     }
 
     # --- Background arc gauge ---
     draw_thick_arc(draw, ARC_CX, ARC_CY, ARC_R,
                    ARC_START, ARC_END_FULL, COL_GAUGE_BG, ARC_WIDTH)
 
-    # --- Divider line ---
-    draw.line([(20, FB_H - 55), (PIP_X - 10, FB_H - 55)], fill=COL_DIM, width=1)
+    # --- Divider line (full width) ---
+    draw.line([(20, FB_H - 55), (FB_W - 20, FB_H - 55)],
+              fill=COL_DIM, width=1)
 
     # --- Speed limit sign ---
     draw_speed_sign(draw, SIGN_CX, SIGN_CY, SIGN_R, limit, fonts)
@@ -204,7 +186,7 @@ def render_hud(speed, limit, over_limit, camera_ahead,
         tip_y = int(ARC_CY + ARC_R * math.sin(tip_rad))
         draw.ellipse([tip_x-6, tip_y-6, tip_x+6, tip_y+6], fill=arc_color)
 
-    # Re-draw sign on top (arc overlaps)
+    # Re-draw sign on top (arc may overlap)
     draw_speed_sign(draw, SIGN_CX, SIGN_CY, SIGN_R, limit, fonts)
 
     # --- Speed number ---
@@ -225,7 +207,7 @@ def render_hud(speed, limit, over_limit, camera_ahead,
     uy = sy + sh + 6
     draw.text((ux, uy), "km/h", fill=COL_DIM, font=font_unit)
 
-    # --- Alert bar ---
+    # --- Alert bar (full width, no PiP cutoff) ---
     if over_limit or camera_ahead:
         if camera_ahead and over_limit:
             draw_alert_bar(draw, "SLOW DOWN", COL_RED, fonts)
@@ -252,8 +234,8 @@ def render_hud(speed, limit, over_limit, camera_ahead,
     dot_color = COL_GREEN if gps_valid else COL_RED
     draw.ellipse([dot_x-4, dot_y-4, dot_x+4, dot_y+4], fill=dot_color)
 
-    # --- PiP placeholder ---
-    draw_pip_placeholder(draw, PIP_X, PIP_Y, PIP_SIZE)
+    # --- Gear icon (settings entry, top-left) ---
+    draw_menu_icon(draw, 18, 18, COL_GEAR)
 
     return img
 
@@ -264,15 +246,15 @@ def render_hud(speed, limit, over_limit, camera_ahead,
 
 def main():
     out_dir = os.path.join(os.path.dirname(os.path.dirname(
-        os.path.abspath(__file__))), 'docs')
+        os.path.abspath(__file__))), 'mockups')
     os.makedirs(out_dir, exist_ok=True)
 
     scenarios = [
         # (filename, speed, limit, over, camera, sats, gps)
-        ('hud_mockup_normal.png',   65,  100, False, False, 10, True),
-        ('hud_mockup_over.png',     112, 100, True,  False, 8,  True),
-        ('hud_mockup_camera.png',   108, 100, True,  True,  8,  True),
-        ('hud_mockup_cam_ok.png',   85,  100, False, True,  7,  True),
+        ('hud_1_normal.png',           85,  100, False, False, 10, True),
+        ('hud_2_speeding.png',         115, 100, True,  False, 8,  True),
+        ('hud_3_camera.png',           85,  80,  False, True,  8,  True),
+        ('hud_4_camera_speeding.png',  95,  80,  True,  True,  8,  True),
     ]
 
     for fname, speed, limit, over, camera, sats, gps in scenarios:
