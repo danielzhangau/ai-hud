@@ -200,35 +200,46 @@ int isp_ctrl_init(int cam_id, const char *iq_dir)
     const char *sns_name = static_info.sensor_info.sensor_name;
     printf("[ISP] Sensor discovered: cam=%d, entity='%s'\n",
            cam_id, sns_name);
+    fflush(stdout);
 
     /* Step 2: Initialize RKAIQ context */
     g_aiq_ctx = rk_aiq_uapi2_sysctl_init(sns_name, iq_dir, NULL, NULL);
     if (!g_aiq_ctx) {
         printf("[ISP] ERROR: sysctl_init failed\n");
+        fflush(stdout);
         return -1;
     }
+    printf("[ISP] sysctl_init: ok\n");
+    fflush(stdout);
 
     /* Step 3: Prepare (0,0 = use sensor default resolution) */
     ret = rk_aiq_uapi2_sysctl_prepare(g_aiq_ctx, 0, 0,
                                        RK_AIQ_WORKING_MODE_NORMAL);
     if (ret != 0) {
         printf("[ISP] ERROR: sysctl_prepare failed: %d\n", ret);
+        fflush(stdout);
         rk_aiq_uapi2_sysctl_deinit(g_aiq_ctx);
         g_aiq_ctx = NULL;
         return -1;
     }
+    printf("[ISP] sysctl_prepare: ok (mode=NORMAL)\n");
+    fflush(stdout);
 
     /* Step 4: Start 3A processing loop */
     ret = rk_aiq_uapi2_sysctl_start(g_aiq_ctx);
     if (ret != 0) {
         printf("[ISP] ERROR: sysctl_start failed: %d\n", ret);
+        fflush(stdout);
         rk_aiq_uapi2_sysctl_deinit(g_aiq_ctx);
         g_aiq_ctx = NULL;
         return -1;
     }
+    printf("[ISP] sysctl_start: ok\n");
+    fflush(stdout);
 
     printf("[ISP] Initialized: cam=%d, iq=%s, mode=NORMAL\n",
            cam_id, iq_dir);
+    fflush(stdout);
     return 0;
 }
 
@@ -240,25 +251,39 @@ int isp_ctrl_apply_defaults(void)
     }
 
     printf("[ISP] Applying dashcam-optimized defaults...\n");
+    fflush(stdout);
+
+    /*
+     * Each tuning step is independent and best-effort.
+     * Some uAPI2 functions may not be available on all ISP versions;
+     * failures are logged but do not abort the pipeline.
+     */
 
     /* Ensure auto-exposure mode */
-    rk_aiq_uapi2_setExpMode(g_aiq_ctx, OP_AUTO);
+    XCamReturn ret = rk_aiq_uapi2_setExpMode(g_aiq_ctx, OP_AUTO);
+    printf("[ISP] setExpMode(AUTO): %s\n", ret == 0 ? "ok" : "failed");
+    fflush(stdout);
 
-    /* Anti-flicker (50Hz for AU + CN) */
+    /* Anti-flicker (auto-detect 50Hz for AU + CN) */
     apply_antiflicker();
+    fflush(stdout);
 
     /* AE gain range (day mode default) */
     apply_gain_range(GAIN_MAX_DAY);
+    fflush(stdout);
 
     /* DRC for high-contrast scenes */
     apply_drc(DRC_LOCAL_WEIT_DAY, DRC_GLOBAL_CONTRAST_DAY,
               DRC_LOLIT_CONTRAST_DAY);
+    fflush(stdout);
 
     /* Noise reduction */
     apply_nr(SPATIAL_NR_DAY, TEMPORAL_NR_DAY);
+    fflush(stdout);
 
     g_night_on = 0;
     printf("[ISP] Dashcam defaults applied (day mode)\n");
+    fflush(stdout);
     return 0;
 }
 
