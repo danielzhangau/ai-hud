@@ -63,6 +63,15 @@ GPS_IPC_TMP = "/tmp/ai_hud_gps.tmp"
 # "cam" = full-screen camera, absent/empty = HUD mode (default)
 DISPLAY_MODE_IPC = "/tmp/ai_hud_display_mode"
 
+# ISP config IPC file -- Python writes, C isp_control reads
+ISP_CONFIG_IPC_FILE = "/tmp/ai_hud_isp_config"
+ISP_CONFIG_IPC_TMP = "/tmp/ai_hud_isp_config.tmp"
+
+# Heartbeat IPC file -- Python writes epoch timestamp, system watchdog reads
+HEARTBEAT_IPC_FILE = "/tmp/ai_hud_heartbeat"
+HEARTBEAT_IPC_TMP = "/tmp/ai_hud_heartbeat.tmp"
+HEARTBEAT_INTERVAL_S = 5  # Write heartbeat at most every N seconds
+
 # ---------------------------------------------------------------------------
 # Region system -- GPS auto-detect for DB switching (UI always English)
 # ---------------------------------------------------------------------------
@@ -332,6 +341,21 @@ def write_npu_enable_ipc(enabled):
         pass
 
 
+def write_isp_config_ipc(night_mode):
+    """Write ISP configuration to IPC file for C isp_control module.
+
+    C reads this periodically and applies AE/DRC/NR changes:
+      night_mode=1 -> higher gain, stronger DRC + temporal NR
+      night_mode=0 -> normal daytime settings
+    """
+    try:
+        with open(ISP_CONFIG_IPC_TMP, "w") as f:
+            f.write(f"night_mode={1 if night_mode else 0}\n")
+        os.rename(ISP_CONFIG_IPC_TMP, ISP_CONFIG_IPC_FILE)
+    except OSError:
+        pass
+
+
 def write_gps_ipc(lat, lon):
     """Write GPS coordinates to IPC file for C frame capture metadata.
 
@@ -343,6 +367,30 @@ def write_gps_ipc(lat, lon):
             f.write(f"lat={lat:.6f}\n")
             f.write(f"lon={lon:.6f}\n")
         os.rename(GPS_IPC_TMP, GPS_IPC_FILE)
+    except OSError:
+        pass
+
+
+_last_heartbeat_time = 0.0
+
+
+def write_heartbeat():
+    """Write epoch timestamp to heartbeat IPC file.
+
+    Called from the main loop. Throttled to at most once per
+    HEARTBEAT_INTERVAL_S seconds to avoid unnecessary I/O.
+    System watchdog in S99_ai_hud monitors this file to detect
+    application-level hangs and trigger reboot if stale.
+    """
+    global _last_heartbeat_time
+    now = time.monotonic()
+    if now - _last_heartbeat_time < HEARTBEAT_INTERVAL_S:
+        return
+    _last_heartbeat_time = now
+    try:
+        with open(HEARTBEAT_IPC_TMP, "w") as f:
+            f.write(f"{int(time.time())}\n")
+        os.rename(HEARTBEAT_IPC_TMP, HEARTBEAT_IPC_FILE)
     except OSError:
         pass
 
@@ -2893,8 +2941,11 @@ def main():
     write_npu_enable_ipc(npu_initial)
     detect.npu_enabled = npu_initial
     write_display_mode_ipc(display_mode)
+    night_mode_initial = config.get_int("settings", "night_mode") if config else 0
+    write_isp_config_ipc(night_mode_initial)
     print(f"Initial state: NPU={'ON' if npu_initial else 'OFF'}, "
           f"display={display_mode}, mirror={'ON' if mirror_enabled else 'OFF'}, "
+          f"night={'ON' if night_mode_initial else 'OFF'}, "
           f"region={region_mgr.region}")
 
     nmea_buf = b""
@@ -2946,11 +2997,16 @@ def main():
                 # Force base layer rebuild so cached layer matches new orientation
                 hud_state.base_layer = None
 
+            def _on_night_mode_change(enabled):
+                write_isp_config_ipc(enabled)
+                print(f"[ISP] Night mode: {'ON' if enabled else 'OFF'}")
+
             settings_ui.on_npu_toggle = _on_npu_toggle
             settings_ui.on_region_change = _on_region_change
             settings_ui.on_fusion_reload = _on_fusion_reload
             settings_ui.on_display_mode_change = _on_display_mode_change
             settings_ui.on_mirror_change = _on_mirror_change
+            settings_ui.on_night_mode_change = _on_night_mode_change
             print(f"Touch: enabled (GT911 @ 0x{touch._addr:02X})")
         else:
             touch = None
@@ -3034,6 +3090,7 @@ def main():
             if gps_fd < 0:
                 time.sleep(0.1)
                 detect.poll()
+                write_heartbeat()
                 # Still render HUD without GPS data
                 if not (settings_ui and settings_ui.active):
                     if display_mode != "cam":
@@ -3082,6 +3139,7 @@ def main():
                 # Write speed to IPC for C adaptive inference rate
                 spd_ipc = gps.speed_kmh if gps.valid else 0.0
                 write_speed_ipc(spd_ipc)
+                write_heartbeat()
 
                 # Write GPS coords to IPC for C frame capture metadata
                 if gps.valid:
@@ -3182,7 +3240,8 @@ def main():
             except OSError:
                 pass
         # Clean up IPC files
-        for ipc_f in (SPEED_IPC_FILE, DISPLAY_MODE_IPC, "/tmp/ai_hud_ready"):
+        for ipc_f in (SPEED_IPC_FILE, DISPLAY_MODE_IPC,
+                      ISP_CONFIG_IPC_FILE, "/tmp/ai_hud_ready"):
             try:
                 os.unlink(ipc_f)
             except OSError:

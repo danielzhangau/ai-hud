@@ -32,8 +32,8 @@
 #include "rk_mpi_vo.h"
 #include "rk_mpi_sys.h"
 #include "rk_mpi_mb.h"
-#include "sample_comm_isp.h"
 
+#include "isp_control.h"
 #include "rknn_detect.h"
 
 /* --------------------------------------------------------------------------
@@ -143,6 +143,9 @@ static void install_signal_handlers(void) {
  * Shutdown order:
  *   1) VI DisableChn -> VI DisableDev
  *   2) ISP Stop
+ *
+ * Uses isp_control module (direct RKAIQ uAPI2) instead of
+ * SAMPLE_COMM_ISP wrapper, for runtime AE/DRC/NR tuning access.
  * -------------------------------------------------------------------------- */
 
 #define ISP_CAM_ID          0
@@ -151,26 +154,20 @@ static void install_signal_handlers(void) {
 static int isp_init(void) {
     int ret;
 
-    ret = SAMPLE_COMM_ISP_Init(ISP_CAM_ID, RK_AIQ_WORKING_MODE_NORMAL,
-                               RK_FALSE, IQ_FILE_DIR);
+    ret = isp_ctrl_init(ISP_CAM_ID, IQ_FILE_DIR);
     if (ret != 0) {
-        printf("[ERROR] SAMPLE_COMM_ISP_Init failed: %d\n", ret);
+        printf("[ERROR] ISP init failed\n");
         return ret;
     }
 
-    ret = SAMPLE_COMM_ISP_Run(ISP_CAM_ID);
-    if (ret != 0) {
-        printf("[ERROR] SAMPLE_COMM_ISP_Run failed: %d\n", ret);
-        return ret;
-    }
+    /* Apply dashcam-optimized AE/DRC/NR defaults */
+    isp_ctrl_apply_defaults();
 
-    printf("[INFO] ISP initialized: cam=%d, iq=%s\n", ISP_CAM_ID, IQ_FILE_DIR);
     return 0;
 }
 
 static void isp_deinit(void) {
-    SAMPLE_COMM_ISP_Stop(ISP_CAM_ID);
-    printf("[INFO] ISP stopped\n");
+    isp_ctrl_deinit();
 }
 
 /* --------------------------------------------------------------------------
@@ -724,6 +721,9 @@ static void *fps_monitor_thread(void *arg) {
         sleep(5);
         if (!g_running)
             break;
+
+        /* Poll ISP IPC for night mode / config changes */
+        isp_ctrl_poll_ipc();
 
         if (g_npu_enabled) {
             float infer_ms, postproc_ms;

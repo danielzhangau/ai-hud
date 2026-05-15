@@ -141,6 +141,7 @@ endif()
 # --------------------------------------------------------------------------
 set(SOURCES
     src/camera_display.c
+    src/isp_control.c
     src/rknn_detect.c
     src/postprocess.c
     src/frame_capture.c
@@ -152,9 +153,8 @@ set(SOURCES
 add_executable(${PROJECT_NAME} ${SOURCES})
 
 target_link_libraries(${PROJECT_NAME}
-    sample_comm     # ISP init/run/stop convenience functions
     rockit_full     # RKMPI full (VI, VPSS, VO, SYS -- rockit_tiny lacks VO)
-    rkaiq           # RKAIQ ISP image quality engine
+    rkaiq           # RKAIQ ISP image quality engine (direct uAPI2 calls)
     rockchip_mpp    # Rockchip MPP codec/output backend
     rga             # 2D graphics acceleration (used by rockit internally)
     rknnmrt         # RKNN NPU runtime (RV1106 mini runtime)

@@ -80,6 +80,7 @@ class SettingsUI:
         self.on_fusion_reload = None       # fn()
         self.on_display_mode_change = None # fn(mode: str)  "hud" or "cam"
         self.on_mirror_change = None      # fn(enabled: bool)
+        self.on_night_mode_change = None  # fn(enabled: bool)
 
         # Page definitions
         self._main_items = [
@@ -87,6 +88,7 @@ class SettingsUI:
              "choices": ["hud", "cam"], "display": {"hud": "HUD", "cam": "CAM"}},
             {"key": "mirror_display", "label": "Mirror",         "type": "toggle"},
             {"key": "npu_enabled",    "label": "NPU Detection",  "type": "toggle"},
+            {"key": "night_mode",     "label": "Night Mode",      "type": "toggle"},
             {"key": "region",         "label": "Region",          "type": "choice",
              "choices": ["au", "cn"], "display": {"au": "AU", "cn": "CN"}},
             {"key": "_fusion",        "label": "Fusion Params",   "type": "submenu"},
@@ -430,6 +432,8 @@ class SettingsUI:
             self.config.save()
             if key == "npu_enabled" and self.on_npu_toggle:
                 self.on_npu_toggle(bool(new_val))
+            elif key == "night_mode" and self.on_night_mode_change:
+                self.on_night_mode_change(bool(new_val))
             elif key == "mirror_display" and self.on_mirror_change:
                 self.on_mirror_change(bool(new_val))
 
