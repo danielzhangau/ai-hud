@@ -75,6 +75,11 @@ _I2C_RESET_THRESHOLD = 10  # consecutive OSErrors before hardware reset
 _STALL_DETECT_S = 2.0    # seconds of no buffer_ready before hw reset
 _STALL_COOLDOWN_S = 30.0  # minimum interval between resets
 
+# Init retry: GT911 may not respond immediately after hardware reset.
+# 5 retries x 200ms = up to 1s extra wait (on top of 500ms calibration).
+_INIT_RETRIES = 5
+_INIT_RETRY_DELAY = 0.2   # seconds between retries
+
 
 # ---------------------------------------------------------------------------
 # TouchEvent result
@@ -127,26 +132,40 @@ class TouchInput:
             print(f"[touch] WARNING: cannot open {bus}: {e}")
             return
 
-        # Auto-detect address
+        # Auto-detect address with retries.
+        # GT911 may need extra time after hardware reset before Product ID
+        # reads succeed -- retry up to _INIT_RETRIES times with short delays
+        # to handle variable startup latency.
         if addr:
             addrs_to_try = [addr]
         else:
             addrs_to_try = [_GT911_ADDR, _GT911_ADDR_ALT]
 
-        for try_addr in addrs_to_try:
-            try:
-                fcntl.ioctl(self._fd, I2C_SLAVE, try_addr)
-                os.write(self._fd, _REG_PRODUCT_ID)
-                pid = os.read(self._fd, 4)
-                if pid[:3] == b"911":
-                    self._addr = try_addr
-                    print(f"[touch] GT911 found at 0x{try_addr:02X} on {bus}")
-                    break
-            except OSError:
-                continue
+        for attempt in range(_INIT_RETRIES):
+            for try_addr in addrs_to_try:
+                try:
+                    fcntl.ioctl(self._fd, I2C_SLAVE, try_addr)
+                    os.write(self._fd, _REG_PRODUCT_ID)
+                    pid = os.read(self._fd, 4)
+                    if pid[:3] == b"911":
+                        self._addr = try_addr
+                        if attempt > 0:
+                            print(f"[touch] GT911 found at 0x{try_addr:02X}"
+                                  f" on {bus} (after {attempt} retries)")
+                        else:
+                            print(f"[touch] GT911 found at 0x{try_addr:02X}"
+                                  f" on {bus}")
+                        break
+                except OSError:
+                    continue
+            if self._addr != 0:
+                break
+            if attempt < _INIT_RETRIES - 1:
+                time.sleep(_INIT_RETRY_DELAY)
 
         if self._addr == 0:
-            print(f"[touch] WARNING: GT911 not found on {bus}")
+            print(f"[touch] WARNING: GT911 not found on {bus}"
+                  f" after {_INIT_RETRIES} attempts")
             os.close(self._fd)
             self._fd = -1
             return
@@ -166,9 +185,11 @@ class TouchInput:
         self._i2c_errors = 0
 
         # Stall detection: GT911 firmware bug can cause buffer_ready to
-        # stay 0 indefinitely while I2C still works.  Track last
-        # buffer_ready=1 time and trigger hw reset after _STALL_DETECT_S.
+        # stay 0 indefinitely while I2C still works.  Only trigger when
+        # touch was recently active -- GT911 legitimately stops scanning
+        # in idle (no touch) low-power mode, which is NOT a stall.
         self._last_br1_time = time.time()
+        self._last_touch_time = 0.0   # last time touch_count > 0
         self._last_reset_time = 0.0
 
         # Non-blocking reset state machine (for runtime recovery).
@@ -216,10 +237,16 @@ class TouchInput:
             touch_count = status_byte & 0x0F
 
             if not buffer_ready:
-                # GT911 stall detection: firmware scans at ~60Hz, so
-                # 2s of continuous buffer_ready=0 is a definitive stall.
+                # GT911 stall detection -- only when touch was recently
+                # active.  GT911 enters low-power idle when untouched,
+                # legitimately producing buffer_ready=0 indefinitely.
+                # A real stall is: user is touching but GT911 stops
+                # reporting.
                 stall_dur = now - self._last_br1_time
-                if (stall_dur > _STALL_DETECT_S
+                touch_recent = (now - self._last_touch_time
+                                < _STALL_DETECT_S * 2)
+                if (touch_recent
+                        and stall_dur > _STALL_DETECT_S
                         and now - self._last_reset_time > _STALL_COOLDOWN_S):
                     print(f"[touch] GT911 stall ({stall_dur:.1f}s),"
                           " starting non-blocking hw reset")
@@ -231,6 +258,7 @@ class TouchInput:
             self._last_br1_time = now
 
             if touch_count > 0 and touch_count <= 5:
+                self._last_touch_time = now
                 # Read first touch point (we only use single-touch)
                 os.write(self._fd, _REG_TOUCH_DATA)
                 data = os.read(self._fd, _TOUCH_POINT_SIZE)
@@ -428,12 +456,18 @@ class TouchInput:
                 self._last_br1_time = now
                 print("[touch] GT911 non-blocking reset complete")
 
-                # Verify GT911 responds
+                # Verify GT911 responds and kick-start scan cycle.
+                # GT911 won't set buffer_ready=1 until the host clears
+                # the status register (write 0x00 to 0x814E) at least
+                # once after reset.
                 try:
                     fcntl.ioctl(self._fd, I2C_SLAVE, self._addr)
                     os.write(self._fd, _REG_PRODUCT_ID)
                     pid = os.read(self._fd, 4)
                     if pid[:3] == b"911":
+                        # Clear status register to start scan cycle
+                        os.write(self._fd,
+                                 _REG_CLEAR_STATUS + b"\x00")
                         print("[touch] GT911 recovered successfully")
                         return []
                 except OSError:
