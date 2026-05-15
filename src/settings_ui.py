@@ -9,7 +9,7 @@ Layout (480x480):
   - Status bar (440-480): version and region
 
 Pages:
-  - "main":   display mode, NPU toggle, region, fusion entry
+  - "main":   display mode, mirror toggle, NPU toggle, region, fusion entry
   - "fusion": NPU fusion parameters with +/- controls and descriptions
 
 No third-party dependencies.
@@ -79,15 +79,17 @@ class SettingsUI:
         self.on_region_change = None       # fn(region: str)
         self.on_fusion_reload = None       # fn()
         self.on_display_mode_change = None # fn(mode: str)  "hud" or "cam"
+        self.on_mirror_change = None      # fn(enabled: bool)
 
         # Page definitions
         self._main_items = [
-            {"key": "display_mode", "label": "Display",        "type": "choice",
+            {"key": "display_mode",   "label": "Display",        "type": "choice",
              "choices": ["hud", "cam"], "display": {"hud": "HUD", "cam": "CAM"}},
-            {"key": "npu_enabled",  "label": "NPU Detection",  "type": "toggle"},
-            {"key": "region",       "label": "Region",          "type": "choice",
+            {"key": "mirror_display", "label": "Mirror",         "type": "toggle"},
+            {"key": "npu_enabled",    "label": "NPU Detection",  "type": "toggle"},
+            {"key": "region",         "label": "Region",          "type": "choice",
              "choices": ["au", "cn"], "display": {"au": "AU", "cn": "CN"}},
-            {"key": "_fusion",      "label": "Fusion Params",   "type": "submenu"},
+            {"key": "_fusion",        "label": "Fusion Params",   "type": "submenu"},
         ]
 
         self._fusion_items = [
@@ -194,8 +196,16 @@ class SettingsUI:
         return True
 
     def render(self):
-        """Full-screen render of settings page."""
+        """Full-screen render of settings page.
+
+        Settings UI is always rendered without mirror -- the user interacts
+        with the screen directly (not through windshield reflection), so
+        text and touch coordinates must stay in normal orientation.
+        """
         fb = self.fb
+        saved_mirror = fb.mirror
+        fb.mirror = False
+
         fb.clear(COL_BG)
 
         if self.page == "main":
@@ -210,6 +220,7 @@ class SettingsUI:
         fb.draw_text(f"v{self.app_version} | {region}", LABEL_X, STATUS_Y + 8, COL_DIM, scale=1)
 
         fb.flush()
+        fb.mirror = saved_mirror
 
     # -----------------------------------------------------------------------
     # Top bar
@@ -419,6 +430,8 @@ class SettingsUI:
             self.config.save()
             if key == "npu_enabled" and self.on_npu_toggle:
                 self.on_npu_toggle(bool(new_val))
+            elif key == "mirror_display" and self.on_mirror_change:
+                self.on_mirror_change(bool(new_val))
 
         elif itype == "choice":
             choices = item["choices"]

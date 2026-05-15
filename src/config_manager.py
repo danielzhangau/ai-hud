@@ -36,6 +36,7 @@ PARAM_DEFS = {
     ("settings", "region"):        (str,   "au", None, None),
     ("settings", "brightness"):    (int,   100,  10,   100),
     ("settings", "display_mode"):  (str,   "hud", None, None),
+    ("settings", "mirror_display"): (int,   0,    0,    1),
 }
 
 # Valid string choices

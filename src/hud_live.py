@@ -2199,6 +2199,7 @@ class Framebuffer:
     def __init__(self, device=FB_DEV, retries=10, retry_delay=2):
         self.fd = -1
         self.buf = bytearray(FB_STRIDE * FB_H)
+        self.mirror = False  # horizontal flip for HUD windshield reflection
         for attempt in range(1, retries + 1):
             try:
                 self.fd = os.open(device, os.O_RDWR)
@@ -2451,13 +2452,18 @@ class Framebuffer:
         return w
 
     def flush(self):
-        """Write buffer to framebuffer device with partial-write handling."""
+        """Write buffer to framebuffer device with partial-write handling.
+
+        When self.mirror is True, each row is horizontally flipped before
+        writing. This is used for HUD windshield reflection mode.
+        """
         if self.fd < 0:
             return
+        data = self._mirror_buf() if self.mirror else self.buf
         try:
             os.lseek(self.fd, 0, os.SEEK_SET)
-            mv = memoryview(self.buf)
-            total = len(self.buf)
+            mv = memoryview(data)
+            total = len(data)
             written = 0
             while written < total:
                 try:
@@ -2471,6 +2477,20 @@ class Framebuffer:
                     break  # non-EINTR error, skip this frame
         except OSError:
             pass  # lseek failed, skip this frame
+
+    def _mirror_buf(self):
+        """Return horizontally mirrored framebuffer data.
+
+        Uses array.array to reverse 4-byte (XRGB8888) pixel groups per row
+        via C-level slice operations. ~1-2ms on Cortex-A7 for 480x480.
+        """
+        import array
+        arr = array.array('I')
+        arr.frombytes(self.buf)
+        for y in range(FB_H):
+            s = y * FB_W
+            arr[s:s + FB_W] = arr[s:s + FB_W][::-1]
+        return arr.tobytes()
 
     def flush_rect(self, x, y, w, h):
         """Write only a rectangular region to framebuffer device.
@@ -2864,11 +2884,17 @@ def main():
         if saved_region and saved_region != region_mgr.region:
             region_mgr.region = saved_region
             speed_db, speed_fusion = load_speed_db()
+    mirror_enabled = False
+    if config:
+        mirror_enabled = bool(config.get_int("settings", "mirror_display"))
+    fb.mirror = mirror_enabled and display_mode != "cam"
+
     write_npu_enable_ipc(npu_initial)
     detect.npu_enabled = npu_initial
     write_display_mode_ipc(display_mode)
     print(f"Initial state: NPU={'ON' if npu_initial else 'OFF'}, "
-          f"display={display_mode}, region={region_mgr.region}")
+          f"display={display_mode}, mirror={'ON' if mirror_enabled else 'OFF'}, "
+          f"region={region_mgr.region}")
 
     nmea_buf = b""
     hud_state = HUDState()
@@ -2906,14 +2932,24 @@ def main():
                 nonlocal display_mode
                 display_mode = mode
                 write_display_mode_ipc(mode)
+                # Mirror only applies to HUD mode
+                fb.mirror = mirror_enabled and mode != "cam"
                 if mode == "hud":
                     # Switching back to HUD: force full redraw
                     hud_state.base_layer = None
+
+            def _on_mirror_change(enabled):
+                nonlocal mirror_enabled
+                mirror_enabled = enabled
+                fb.mirror = enabled and display_mode != "cam"
+                # Force base layer rebuild so cached layer matches new orientation
+                hud_state.base_layer = None
 
             settings_ui.on_npu_toggle = _on_npu_toggle
             settings_ui.on_region_change = _on_region_change
             settings_ui.on_fusion_reload = _on_fusion_reload
             settings_ui.on_display_mode_change = _on_display_mode_change
+            settings_ui.on_mirror_change = _on_mirror_change
             print(f"Touch: enabled (GT911 @ 0x{touch._addr:02X})")
         else:
             touch = None
