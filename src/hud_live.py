@@ -2629,17 +2629,18 @@ def render_hud(fb, gps, state=None, detect=None):
     # --- Delta check: skip full redraw if nothing changed ---
     if state is not None:
         limit_changed = state.speed_limit != current_limit
-        if (state.speed_int == speed_int and
+        needs_rebuild = limit_changed or state.base_layer is None
+        if (not needs_rebuild and
+                state.speed_int == speed_int and
                 state.over_limit == over_limit and
                 state.valid == gps.valid and
                 state.satellites == gps.satellites and
                 state.fix_quality == gps.fix_quality and
-                state.camera_detected == camera and
-                not limit_changed):
+                state.camera_detected == camera):
             return  # nothing changed, skip render
 
-        # Rebuild base layer if speed limit changed (sign needs redraw)
-        if limit_changed or state.base_layer is None:
+        # Rebuild base layer if speed limit changed or invalidated
+        if needs_rebuild:
             state.base_layer = _build_base_layer(fb, current_limit)
         fb.buf[:] = state.base_layer
 
@@ -2985,6 +2986,13 @@ def main():
                 was_active = settings_ui.active
                 try:
                     for ev in touch.poll():
+                        # Mirror touch x-coordinate when display is mirrored,
+                        # so tap targets match the visually flipped layout.
+                        # Settings UI disables mirror during render, but the
+                        # touch zone must still be mirrored when settings is
+                        # not active (HUD is mirrored on screen).
+                        if mirror_enabled and not settings_ui.active:
+                            ev.x = FB_W - 1 - ev.x
                         if settings_ui.active:
                             try:
                                 settings_ui.handle_touch(ev)
