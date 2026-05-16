@@ -16,7 +16,7 @@
 # Note: Splash screen is handled by S01_ai_hud_splash (earliest init).
 
 AI_HUD="/root/ai-hud"
-AI_HUD_MODEL="/root/model/au_speed_signs_rv1106.rknn"
+AI_HUD_MODEL="/root/model/speed_signs_rv1106.rknn"
 AI_HUD_PIDFILE="/var/run/ai_hud_c.pid"
 
 HUD_PY="/root/hud_live.py"
@@ -25,6 +25,8 @@ HUD_PY_PIDFILE="/var/run/ai_hud_py.pid"
 
 WATCHDOG_C_PID="/var/run/ai_hud_watchdog_c.pid"
 WATCHDOG_PY_PID="/var/run/ai_hud_watchdog_py.pid"
+
+WATCHDOG_SYS_PID="/var/run/ai_hud_watchdog_sys.pid"
 
 LOGFILE="/var/log/ai_hud.log"
 LOGFILE_C="/var/log/ai_hud_c.log"
@@ -37,12 +39,19 @@ LOG_MAX_SIZE=1048576
 # Respawn delay (seconds) after crash
 RESPAWN_DELAY=3
 
+# System watchdog: reboot if Python heartbeat stale for this long
+HEARTBEAT_FILE="/tmp/ai_hud_heartbeat"
+HEARTBEAT_TIMEOUT=90    # seconds before considering app hung
+HEARTBEAT_CHECK=10      # check interval (seconds)
+HEARTBEAT_GRACE=120     # grace period after boot before checking
+
 # Ensure RKMPI libraries are in the search path (init.d may not inherit profile)
 export LD_LIBRARY_PATH="/oem/usr/lib:/oem/lib:${LD_LIBRARY_PATH}"
 
 # HUD region: "au" (Australia) or "cn" (China)
 # GPS auto-detects region, this sets the default before first GPS fix
-export HUD_REGION="${HUD_REGION:-au}"
+# Testing: default CN; production: change to "au"
+export HUD_REGION="${HUD_REGION:-cn}"
 
 log() {
     echo "$(date '+%Y-%m-%d %H:%M:%S') $1" >> "$LOGFILE"
@@ -160,6 +169,34 @@ watchdog_py() {
     done
 }
 
+# System-level watchdog: reboot device if Python heartbeat goes stale.
+# Catches application-level deadlocks where processes don't crash but
+# stop responding (e.g., RKMPI driver hang, Python GIL deadlock).
+# NOTE: Cannot recover from kernel-level freezes (needs CONFIG_DW_WATCHDOG).
+system_watchdog() {
+    # Wait grace period for processes to start and write first heartbeat
+    sleep "$HEARTBEAT_GRACE"
+
+    while true; do
+        sleep "$HEARTBEAT_CHECK"
+
+        # Read heartbeat timestamp (shell builtin, no fork)
+        read _hb_ts < "$HEARTBEAT_FILE" 2>/dev/null || continue
+        [ -n "$_hb_ts" ] || continue
+
+        _now=$(date +%s)
+        _age=$(( _now - _hb_ts ))
+
+        if [ "$_age" -gt "$HEARTBEAT_TIMEOUT" ]; then
+            log "WATCHDOG: heartbeat stale for ${_age}s (threshold=${HEARTBEAT_TIMEOUT}s), rebooting!"
+            sync
+            sleep 1
+            reboot -f
+            sleep 30  # should not reach here
+        fi
+    done
+}
+
 start() {
     log "===== START ====="
 
@@ -169,9 +206,10 @@ start() {
     # Kill leftover watchdog loops
     safe_kill "$WATCHDOG_C_PID" "watchdog" KILL
     safe_kill "$WATCHDOG_PY_PID" "watchdog" KILL
+    safe_kill "$WATCHDOG_SYS_PID" "S99_ai_hud" KILL
     rm -f "$AI_HUD_PIDFILE" "$HUD_PY_PIDFILE"
-    rm -f "$WATCHDOG_C_PID" "$WATCHDOG_PY_PID"
-    rm -f /tmp/ai_hud_ready /tmp/ai_hud_detect /tmp/ai_hud_speed
+    rm -f "$WATCHDOG_C_PID" "$WATCHDOG_PY_PID" "$WATCHDOG_SYS_PID"
+    rm -f /tmp/ai_hud_ready /tmp/ai_hud_detect /tmp/ai_hud_speed /tmp/ai_hud_heartbeat /tmp/ai_hud_isp_config
     sleep 1
 
     # Rotate logs before starting
@@ -196,19 +234,25 @@ start() {
     watchdog_py &
     echo $! > "$WATCHDOG_PY_PID"
 
-    log "Watchdogs started: C=$(cat $WATCHDOG_C_PID) Py=$(cat $WATCHDOG_PY_PID)"
+    # Launch system watchdog (heartbeat monitor -> reboot on hang)
+    system_watchdog &
+    echo $! > "$WATCHDOG_SYS_PID"
+
+    log "Watchdogs started: C=$(cat $WATCHDOG_C_PID) Py=$(cat $WATCHDOG_PY_PID) Sys=$(cat $WATCHDOG_SYS_PID)"
 }
 
 stop() {
     log "===== STOP ====="
 
     # 1. Stop watchdog loops first (prevent respawn during shutdown)
+    safe_kill "$WATCHDOG_SYS_PID" "S99_ai_hud" TERM
     safe_kill "$WATCHDOG_C_PID" "S99_ai_hud" TERM
     safe_kill "$WATCHDOG_PY_PID" "S99_ai_hud" TERM
     sleep 1
+    safe_kill "$WATCHDOG_SYS_PID" "S99_ai_hud" KILL
     safe_kill "$WATCHDOG_C_PID" "S99_ai_hud" KILL
     safe_kill "$WATCHDOG_PY_PID" "S99_ai_hud" KILL
-    rm -f "$WATCHDOG_C_PID" "$WATCHDOG_PY_PID"
+    rm -f "$WATCHDOG_C_PID" "$WATCHDOG_PY_PID" "$WATCHDOG_SYS_PID"
 
     # 2. Graceful SIGTERM to worker processes
     safe_kill "$HUD_PY_PIDFILE" "hud_live" TERM
@@ -228,7 +272,7 @@ stop() {
     # Clean up IPC files
     rm -f /tmp/ai_hud_ready /tmp/ai_hud_detect /tmp/ai_hud_speed
     rm -f /tmp/ai_hud_npu_enable /tmp/ai_hud_gps /tmp/ai_hud_display_mode
-    rm -f /tmp/ai_hud_pip_hide
+    rm -f /tmp/ai_hud_pip_hide /tmp/ai_hud_heartbeat /tmp/ai_hud_isp_config
 
     # Clear the framebuffer to black
     clear_screen

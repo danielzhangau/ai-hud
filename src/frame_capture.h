@@ -23,6 +23,7 @@
 #define CAPTURE_MAX_FRAMES_DEFAULT  500
 
 /* Trigger thresholds */
+#define CAPTURE_ENABLE_CHECK_SEC    2       /* How often to re-read IPC enable file */
 #define CAPTURE_PERIODIC_SEC        30      /* Periodic capture interval (driving) */
 #define CAPTURE_DETECT_COOLDOWN_MS  5000    /* Min ms between detection-triggered saves */
 #define CAPTURE_MIN_CONF            0.15f   /* Min confidence to trigger detection save */

@@ -35,6 +35,10 @@ static struct {
     /* Timing for trigger logic */
     int64_t last_detect_save_us;
     int64_t last_periodic_save_us;
+
+    /* Cached enable check (avoid fopen every frame) */
+    int64_t last_enable_check_us;
+    int     cached_enabled;
 } g_cap;
 
 /* --------------------------------------------------------------------------
@@ -206,14 +210,27 @@ int capture_init(const char *output_dir, int max_frames)
 
 int capture_is_enabled(void)
 {
+    /* Throttle file I/O: re-read IPC file at most every N seconds */
+    int64_t now_us = cap_time_us();
+    int64_t elapsed = now_us - g_cap.last_enable_check_us;
+    if (g_cap.last_enable_check_us != 0 &&
+        elapsed < (int64_t)CAPTURE_ENABLE_CHECK_SEC * 1000000)
+        return g_cap.cached_enabled;
+
+    g_cap.last_enable_check_us = now_us;
+
     FILE *fp = fopen(CAPTURE_ENABLE_IPC_FILE, "r");
-    if (!fp)
+    if (!fp) {
+        g_cap.cached_enabled = 0;
         return 0;  /* Default: disabled */
+    }
     int val = 0;
     if (fscanf(fp, "%d", &val) != 1)
         val = 0;
     fclose(fp);
-    return val != 0;
+
+    g_cap.cached_enabled = (val != 0);
+    return g_cap.cached_enabled;
 }
 
 int capture_check_and_save(const uint8_t *nv12_data, int width, int height,

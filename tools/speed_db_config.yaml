@@ -1,0 +1,197 @@
+# =============================================================
+# Speed Database Configuration
+# =============================================================
+# All data sources, cities, and known cameras are defined here.
+# To update: edit this file, then run:
+#   python tools/prepare_speed_db.py --region au
+#   python tools/prepare_speed_db.py --region cn
+# =============================================================
+
+version: 2
+last_updated: "2026-05-13"
+
+# Overpass API endpoint
+overpass_api: "https://overpass-api.de/api/interpreter"
+
+# Grid resolution for spatial indexing (must match speed_db.py)
+grid_resolution: 0.005
+
+# Rate limit between Overpass requests (seconds)
+overpass_delay: 3
+
+# Road types queried from OSM (Overpass highway filter)
+osm_road_types:
+  - motorway
+  - motorway_link
+  - trunk
+  - trunk_link
+  - primary
+  - primary_link
+  - secondary
+  - secondary_link
+
+# Sampling interval for linestring -> point conversion (meters)
+sample_interval_m: 30
+
+# ---------------------------------------------------------------------------
+# Regions
+# ---------------------------------------------------------------------------
+regions:
+  au:
+    description: "Australia"
+    output_suffix: ""  # speed_zones.db, speed_cameras.db
+    overpass_camera_query: |
+      [out:json][timeout:120];
+      area["name"="Australia"]["admin_level"="2"]->.au;
+      (
+        node["highway"="speed_camera"](area.au);
+        node["enforcement"="maxspeed"](area.au);
+        node["man_made"="surveillance"]["surveillance:type"="camera"]["surveillance:zone"="traffic"](area.au);
+      );
+      out body;
+
+    # Metro bounding boxes: [south, west, north, east]
+    # Split large metros into sub-tiles to avoid Overpass timeouts.
+    cities:
+      # Brisbane metro - 4 quadrants
+      Brisbane_NW: [-27.45, 152.90, -27.30, 153.05]
+      Brisbane_NE: [-27.45, 153.05, -27.30, 153.20]
+      Brisbane_SW: [-27.55, 152.95, -27.45, 153.10]
+      Brisbane_SE: [-27.55, 153.05, -27.45, 153.20]
+      # Sydney metro - key corridors
+      Sydney_CBD:  [-33.90, 151.15, -33.82, 151.25]
+      Sydney_W:    [-33.90, 151.00, -33.80, 151.15]
+      Sydney_N:    [-33.82, 151.15, -33.72, 151.28]
+      Sydney_S:    [-33.98, 151.10, -33.90, 151.25]
+      # Melbourne metro
+      Melbourne_CBD: [-37.84, 144.92, -37.78, 145.02]
+      Melbourne_E:   [-37.84, 145.02, -37.76, 145.15]
+      Melbourne_W:   [-37.84, 144.80, -37.76, 144.92]
+      Melbourne_N:   [-37.78, 144.92, -37.70, 145.08]
+      # Perth
+      Perth_CBD:   [-31.98, 115.82, -31.92, 115.90]
+      # Adelaide
+      Adelaide_CBD: [-34.96, 138.56, -34.88, 138.64]
+      # Canberra
+      Canberra:    [-35.35, 149.08, -35.25, 149.18]
+      # Gold Coast
+      Gold_Coast:  [-28.10, 153.38, -28.00, 153.48]
+
+    # Government data sources (optional, higher quality than OSM)
+    government_sources:
+      vic_geojson:
+        url: "https://opendata.transport.vic.gov.au/dataset/975b80b9-e530-46e2-80a5-54002765e81a/resource/91313d09-a353-4e4a-bca0-d137113790c8/download/speed_zones_march_2026.geojson"
+        license: "CC BY 4.0"
+        description: "VIC speed zones - March 2026 (Department of Transport and Planning)"
+
+    # Known cameras from government/public sources
+    # Fields: lat, lon, speed, type (fixed/red_light/mobile/average/point_to_point), source
+    known_cameras:
+      # VIC - cameras.vic.gov.au
+      - {lat: -37.8136, lon: 144.9631, speed: 60, type: fixed, source: "cameras.vic.gov.au, Melbourne CBD"}
+      - {lat: -37.7749, lon: 144.8443, speed: 80, type: fixed, source: "cameras.vic.gov.au, Western Ring Road"}
+      - {lat: -37.8197, lon: 145.0568, speed: 60, type: point_to_point, source: "cameras.vic.gov.au, Hoddle St / Eastern Fwy"}
+      - {lat: -37.6567, lon: 144.9450, speed: 80, type: fixed, source: "cameras.vic.gov.au, Hume Fwy Craigieburn"}
+      - {lat: -38.1485, lon: 144.3614, speed: 60, type: point_to_point, source: "cameras.vic.gov.au, Geelong"}
+      # NSW - TfNSW
+      - {lat: -33.8688, lon: 151.2093, speed: 50, type: fixed, source: "TfNSW, Sydney CBD"}
+      - {lat: -33.8914, lon: 151.2764, speed: 60, type: fixed, source: "TfNSW, Eastern Distributor"}
+      - {lat: -33.7966, lon: 151.1805, speed: 60, type: fixed, source: "TfNSW, Pacific Hwy Chatswood"}
+      - {lat: -33.9425, lon: 151.2230, speed: 60, type: point_to_point, source: "TfNSW, King St Newtown"}
+      - {lat: -33.8568, lon: 151.0382, speed: 80, type: fixed, source: "TfNSW, M4 Motorway"}
+      # QLD - mobile zones (approximate)
+      - {lat: -27.4698, lon: 153.0251, speed: 60, type: mobile, source: "QLD Police, Brisbane CBD"}
+      - {lat: -27.3812, lon: 153.0286, speed: 80, type: mobile, source: "QLD Police, Gateway Motorway"}
+      - {lat: -27.5613, lon: 153.0820, speed: 60, type: mobile, source: "QLD Police, Logan Motorway"}
+
+  cn:
+    description: "China (Xi'an + Shanghai)"
+    output_suffix: "_cn"  # speed_zones_cn.db, speed_cameras_cn.db
+    overpass_camera_query: |
+      [out:json][timeout:120];
+      (
+        node["highway"="speed_camera"](34.10,108.80,34.40,109.15);
+        node["enforcement"="maxspeed"](34.10,108.80,34.40,109.15);
+        node["highway"="speed_camera"](31.00,121.20,31.45,121.60);
+        node["enforcement"="maxspeed"](31.00,121.20,31.45,121.60);
+        node["man_made"="surveillance"]["surveillance:type"="camera"]["surveillance:zone"="traffic"](34.10,108.80,34.40,109.15);
+        node["man_made"="surveillance"]["surveillance:type"="camera"]["surveillance:zone"="traffic"](31.00,121.20,31.45,121.60);
+      );
+      out body;
+
+    cities:
+      # Xi'an (center ~34.26N, 108.94E)
+      Xi'an_CBD: [34.22, 108.88, 34.30, 109.00]
+      Xi'an_N:   [34.30, 108.88, 34.38, 109.00]
+      Xi'an_S:   [34.15, 108.88, 34.22, 109.00]
+      # Shanghai (center ~31.23N, 121.47E)
+      Shanghai_CBD: [31.18, 121.40, 31.28, 121.52]
+      Shanghai_N:   [31.28, 121.38, 31.38, 121.52]
+      Shanghai_W:   [31.18, 121.28, 31.28, 121.40]
+      Shanghai_S:   [31.08, 121.40, 31.18, 121.55]
+
+    government_sources: {}
+
+    # Known cameras: OSM expressway geometry + public traffic enforcement reports
+    # Cameras placed at ~4km intervals along major expressways
+    known_cameras:
+      # Xi'an Beltway (G30, limit 100)
+      - {lat: 34.365922, lon: 108.939901, speed: 100, type: fixed, source: "OSM geometry, Xi'an Beltway G30"}
+      - {lat: 34.191108, lon: 108.885211, speed: 100, type: fixed, source: "OSM geometry, Xi'an Beltway G30"}
+      - {lat: 34.197793, lon: 108.999042, speed: 100, type: fixed, source: "OSM geometry, Xi'an Beltway G30"}
+      - {lat: 34.264590, lon: 109.070270, speed: 100, type: fixed, source: "OSM geometry, Xi'an Beltway G30"}
+      - {lat: 34.358705, lon: 109.027255, speed: 100, type: fixed, source: "OSM geometry, Xi'an Beltway G30"}
+      - {lat: 34.312784, lon: 108.786763, speed: 100, type: fixed, source: "OSM geometry, Xi'an Beltway G30"}
+      - {lat: 34.251212, lon: 108.792675, speed: 100, type: fixed, source: "OSM geometry, Xi'an Beltway G30"}
+      - {lat: 34.357591, lon: 108.896928, speed: 100, type: fixed, source: "OSM geometry, Xi'an Beltway G30"}
+      - {lat: 34.340753, lon: 109.072044, speed: 100, type: fixed, source: "OSM geometry, Xi'an Beltway G30"}
+      - {lat: 34.301353, lon: 109.089603, speed: 100, type: fixed, source: "OSM geometry, Xi'an Beltway G30"}
+      - {lat: 34.214453, lon: 108.809016, speed: 100, type: fixed, source: "OSM geometry, Xi'an Beltway G30"}
+      - {lat: 34.189985, lon: 108.950240, speed: 100, type: fixed, source: "OSM geometry, Xi'an Beltway G30"}
+      - {lat: 34.342781, lon: 108.825893, speed: 100, type: fixed, source: "OSM geometry, Xi'an Beltway G30"}
+      - {lat: 34.216036, lon: 109.043451, speed: 100, type: fixed, source: "OSM geometry, Xi'an Beltway G30"}
+      # Shanghai G2 (limit 120)
+      - {lat: 31.252585, lon: 121.298519, speed: 120, type: fixed, source: "OSM geometry, Shanghai G2"}
+      # Shanghai G15 (limit 100)
+      - {lat: 31.289033, lon: 121.246068, speed: 100, type: fixed, source: "OSM geometry, Shanghai G15"}
+      - {lat: 31.248937, lon: 121.237150, speed: 100, type: fixed, source: "OSM geometry, Shanghai G15"}
+      - {lat: 31.213726, lon: 121.254228, speed: 100, type: fixed, source: "OSM geometry, Shanghai G15"}
+      - {lat: 31.167673, lon: 121.278227, speed: 100, type: fixed, source: "OSM geometry, Shanghai G15"}
+      - {lat: 31.110954, lon: 121.296775, speed: 100, type: fixed, source: "OSM geometry, Shanghai G15"}
+      - {lat: 31.382035, lon: 121.202503, speed: 100, type: fixed, source: "OSM geometry, Shanghai G15"}
+      # Shanghai G50 (limit 100)
+      - {lat: 31.183805, lon: 121.353115, speed: 100, type: fixed, source: "OSM geometry, Shanghai G50"}
+      - {lat: 31.148653, lon: 121.215151, speed: 100, type: fixed, source: "OSM geometry, Shanghai G50"}
+      # Shanghai G60 (limit 100)
+      - {lat: 31.057544, lon: 121.293775, speed: 100, type: fixed, source: "OSM geometry, Shanghai G60"}
+      - {lat: 31.115805, lon: 121.356209, speed: 100, type: fixed, source: "OSM geometry, Shanghai G60"}
+      # Shanghai G1503 (limit 100)
+      - {lat: 31.324438, lon: 121.151023, speed: 100, type: fixed, source: "OSM geometry, Shanghai G1503"}
+      - {lat: 31.340417, lon: 121.194251, speed: 100, type: fixed, source: "OSM geometry, Shanghai G1503"}
+      - {lat: 31.354604, lon: 121.233266, speed: 100, type: fixed, source: "OSM geometry, Shanghai G1503"}
+      - {lat: 31.373211, lon: 121.303997, speed: 100, type: fixed, source: "OSM geometry, Shanghai G1503"}
+      - {lat: 31.385226, lon: 121.363633, speed: 100, type: fixed, source: "OSM geometry, Shanghai G1503"}
+      - {lat: 31.401517, lon: 121.416649, speed: 100, type: fixed, source: "OSM geometry, Shanghai G1503"}
+      - {lat: 31.414639, lon: 121.481442, speed: 80, type: fixed, source: "OSM geometry, Shanghai G1503"}
+      - {lat: 31.367505, lon: 121.554736, speed: 100, type: fixed, source: "OSM geometry, Shanghai G1503"}
+      - {lat: 31.348505, lon: 121.597912, speed: 100, type: fixed, source: "OSM geometry, Shanghai G1503"}
+      - {lat: 31.306563, lon: 121.649570, speed: 100, type: fixed, source: "OSM geometry, Shanghai G1503"}
+      - {lat: 31.263760, lon: 121.144413, speed: 100, type: fixed, source: "OSM geometry, Shanghai G1503"}
+      - {lat: 31.217609, lon: 121.142694, speed: 100, type: fixed, source: "OSM geometry, Shanghai G1503"}
+      - {lat: 31.170718, lon: 121.140773, speed: 100, type: fixed, source: "OSM geometry, Shanghai G1503"}
+      - {lat: 31.126764, lon: 121.129147, speed: 100, type: fixed, source: "OSM geometry, Shanghai G1503"}
+      - {lat: 31.087728, lon: 121.119822, speed: 100, type: fixed, source: "OSM geometry, Shanghai G1503"}
+      - {lat: 31.049390, lon: 121.132576, speed: 100, type: fixed, source: "OSM geometry, Shanghai G1503"}
+      # Shanghai S20 (limit 80)
+      - {lat: 31.378062, lon: 121.500467, speed: 80, type: fixed, source: "OSM geometry, Shanghai S20"}
+      - {lat: 31.358196, lon: 121.433599, speed: 80, type: fixed, source: "OSM geometry, Shanghai S20"}
+      - {lat: 31.342172, lon: 121.378342, speed: 80, type: fixed, source: "OSM geometry, Shanghai S20"}
+      - {lat: 31.309692, lon: 121.359104, speed: 80, type: fixed, source: "OSM geometry, Shanghai S20"}
+      - {lat: 31.263041, lon: 121.353327, speed: 80, type: fixed, source: "OSM geometry, Shanghai S20"}
+      - {lat: 31.219696, lon: 121.346225, speed: 80, type: fixed, source: "OSM geometry, Shanghai S20"}
+      - {lat: 31.134167, lon: 121.493318, speed: 80, type: fixed, source: "OSM geometry, Shanghai S20"}
+      - {lat: 31.146841, lon: 121.564613, speed: 80, type: fixed, source: "OSM geometry, Shanghai S20"}
+      - {lat: 31.169704, lon: 121.642945, speed: 80, type: fixed, source: "OSM geometry, Shanghai S20"}
+      - {lat: 31.208826, lon: 121.639834, speed: 80, type: fixed, source: "OSM geometry, Shanghai S20"}
+      - {lat: 31.262668, lon: 121.639692, speed: 80, type: fixed, source: "OSM geometry, Shanghai S20"}
+      - {lat: 31.123822, lon: 121.430889, speed: 80, type: fixed, source: "OSM geometry, Shanghai S20"}
