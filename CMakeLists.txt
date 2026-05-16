@@ -94,15 +94,7 @@ add_definitions(-DRV1106_RV1103)
 # --------------------------------------------------------------------------
 # OBJ_CLASS_NUM defaults to 11 in postprocess.h
 
-# --------------------------------------------------------------------------
-# COCO test mode: use 80-class COCO model for NPU pipeline testing
-# Build with: cmake .. -DCOCO_TEST=ON
-# --------------------------------------------------------------------------
-option(COCO_TEST "Build with COCO 80-class labels for NPU pipeline testing" OFF)
-if(COCO_TEST)
-    add_definitions(-DOBJ_CLASS_NUM=80)
-    message(STATUS "COCO test mode: OBJ_CLASS_NUM=80")
-endif()
+# OBJ_CLASS_NUM=11 (default in postprocess.h), no per-region variants needed
 
 # --------------------------------------------------------------------------
 # Include directories
