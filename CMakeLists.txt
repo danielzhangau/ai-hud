@@ -137,6 +137,7 @@ set(SOURCES
     src/rknn_detect.c
     src/postprocess.c
     src/frame_capture.c
+    src/overlay_draw.c
 )
 
 # --------------------------------------------------------------------------

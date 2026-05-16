@@ -35,6 +35,7 @@
 
 #include "isp_control.h"
 #include "rknn_detect.h"
+#include "overlay_draw.h"
 
 /* --------------------------------------------------------------------------
  * Constants
@@ -494,6 +495,18 @@ static void *pip_render_thread(void *arg) {
                 frame.stVFrame.u32Height == DISPLAY_HEIGHT &&
                 g_fb_map != NULL) {
                 nv12_480_to_fullscreen_xrgb((const uint8_t *)vaddr, g_fb_map);
+
+                /* Overlay NPU detection bounding boxes + labels */
+                if (g_npu_enabled) {
+                    detect_result_group_t det_snap;
+                    if (rknn_detect_get_result(&g_detector, &det_snap) == 0
+                        && det_snap.count > 0) {
+                        overlay_draw_detections(g_fb_map,
+                                                DISPLAY_WIDTH, DISPLAY_HEIGHT,
+                                                &det_snap);
+                    }
+                }
+
                 frame_count++;
             }
         }
