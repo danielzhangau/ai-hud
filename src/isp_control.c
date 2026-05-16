@@ -144,18 +144,37 @@ static int apply_antiflicker(void)
 
 /*
  * Apply DRC (Dynamic Range Compression) settings.
+ *
+ * Uses setDrcLocalData (with auto-enable) first, which is the
+ * complete API supported by ISP32.  Falls back to setDrcLocalTMO
+ * if setDrcLocalData is not available.
  */
 static int apply_drc(float local_weit, float global_contrast, float lolit_contrast)
 {
-    XCamReturn ret = rk_aiq_uapi2_setDrcLocalTMO(
-        g_aiq_ctx, local_weit, global_contrast, lolit_contrast);
-    if (ret != 0) {
-        printf("[ISP] WARN: setDrcLocalTMO failed: %d\n", ret);
-        return -1;
+    XCamReturn ret;
+
+    /* Try full API with auto mode enabled (ISP32 preferred) */
+    ret = rk_aiq_uapi2_setDrcLocalData(
+        g_aiq_ctx, local_weit, global_contrast, lolit_contrast,
+        1,      /* LocalAutoEnable = true */
+        1.0f);  /* LocalAutoWeit = 1.0 (full auto weight) */
+    if (ret == 0) {
+        printf("[ISP] DRC: local=%.2f global=%.2f lolit=%.2f (auto)\n",
+               local_weit, global_contrast, lolit_contrast);
+        return 0;
     }
-    printf("[ISP] DRC: local=%.2f global=%.2f lolit=%.2f\n",
-           local_weit, global_contrast, lolit_contrast);
-    return 0;
+    printf("[ISP] WARN: setDrcLocalData failed: %d, trying setDrcLocalTMO\n", ret);
+
+    /* Fallback: simpler TMO-only API */
+    ret = rk_aiq_uapi2_setDrcLocalTMO(
+        g_aiq_ctx, local_weit, global_contrast, lolit_contrast);
+    if (ret == 0) {
+        printf("[ISP] DRC: local=%.2f global=%.2f lolit=%.2f (TMO)\n",
+               local_weit, global_contrast, lolit_contrast);
+        return 0;
+    }
+    printf("[ISP] WARN: DRC not available on this ISP (err=%d), skipping\n", ret);
+    return -1;
 }
 
 /*
