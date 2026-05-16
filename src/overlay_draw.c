@@ -260,7 +260,11 @@ void overlay_draw_detections(uint8_t *fb, int fb_w, int fb_h,
     if (!fb || !dets || dets->count <= 0)
         return;
 
-    for (int i = 0; i < dets->count; i++) {
+    int count = dets->count;
+    if (count > OBJ_NUMB_MAX_SIZE)
+        count = OBJ_NUMB_MAX_SIZE;
+
+    for (int i = 0; i < count; i++) {
         const detect_result_t *d = &dets->results[i];
 
         /* Map bbox from NPU space (640x640) to display space (480x480) */
@@ -297,6 +301,10 @@ void overlay_draw_detections(uint8_t *fb, int fb_w, int fb_h,
         /* If label would go above the screen, place it below the box */
         if (lbl_y < 0)
             lbl_y = dy1 + LABEL_PAD;
+        if (lbl_y + lbl_h + LABEL_PAD >= fb_h)
+            lbl_y = fb_h - lbl_h - LABEL_PAD - 1;
+        if (lbl_y < LABEL_PAD)
+            lbl_y = LABEL_PAD;
 
         /* Clamp label X to stay on screen */
         if (lbl_x + lbl_w + LABEL_PAD > fb_w)
