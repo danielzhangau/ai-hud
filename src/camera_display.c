@@ -36,6 +36,7 @@
 #include "isp_control.h"
 #include "rknn_detect.h"
 #include "overlay_draw.h"
+#include "hud_ipc.h"
 
 /* --------------------------------------------------------------------------
  * Constants
