@@ -567,9 +567,21 @@ static void *inference_thread_func(void *arg) {
          * At 0-5 km/h (parked), inference runs every ~5s to save power.
          * At 100+ km/h (highway), inference runs every ~200ms for
          * timely construction zone / camera detection.
+         *
+         * Exception: CAM display mode bypasses throttling entirely for
+         * real-time detection visualization (~20 FPS on RV1106).
          */
         int64_t frame_t1 = get_current_time_us();
         float frame_ms = (float)(frame_t1 - frame_t0) / 1000.0f;
+
+        /* In CAM mode, skip adaptive sleep for real-time feedback */
+        int is_cam_mode = (access("/tmp/ai_hud_display_mode", F_OK) == 0);
+        if (is_cam_mode) {
+            /* Minimal yield to avoid starving other threads */
+            usleep(10 * 1000);  /* 10ms */
+            continue;
+        }
+
         float speed_kmh = hud_ipc_read_speed();
         int sleep_ms = hud_ipc_adaptive_sleep_ms(speed_kmh, frame_ms);
 
