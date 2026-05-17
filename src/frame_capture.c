@@ -6,13 +6,13 @@
  */
 
 #include "frame_capture.h"
+#include "utils.h"
 
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <limits.h>
 #include <sys/stat.h>
-#include <sys/time.h>
 #include <dirent.h>
 #include <unistd.h>
 #include <time.h>
@@ -44,13 +44,6 @@ static struct {
 /* --------------------------------------------------------------------------
  * Internal helpers
  * -------------------------------------------------------------------------- */
-
-static int64_t cap_time_us(void)
-{
-    struct timeval tv;
-    gettimeofday(&tv, NULL);
-    return (int64_t)tv.tv_sec * 1000000 + tv.tv_usec;
-}
 
 /*
  * Read GPS coordinates from Python IPC file.
@@ -211,7 +204,7 @@ int capture_init(const char *output_dir, int max_frames)
 int capture_is_enabled(void)
 {
     /* Throttle file I/O: re-read IPC file at most every N seconds */
-    int64_t now_us = cap_time_us();
+    int64_t now_us = time_us();
     int64_t elapsed = now_us - g_cap.last_enable_check_us;
     if (g_cap.last_enable_check_us != 0 &&
         elapsed < (int64_t)CAPTURE_ENABLE_CHECK_SEC * 1000000)
@@ -243,7 +236,7 @@ int capture_check_and_save(const uint8_t *nv12_data, int width, int height,
     if (!capture_is_enabled())
         return 0;
 
-    int64_t now_us = cap_time_us();
+    int64_t now_us = time_us();
     int trigger = -1;
 
     /* --- Detection trigger: save when sign detected with sufficient confidence --- */

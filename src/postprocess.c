@@ -20,6 +20,7 @@
  */
 
 #include "postprocess.h"
+#include "utils.h"
 
 #include <math.h>
 #include <string.h>
@@ -318,22 +319,6 @@ static int nms(raw_detection_t *dets, int count, float nms_threshold,
 }
 
 /* --------------------------------------------------------------------------
- * Clamp utility
- * -------------------------------------------------------------------------- */
-
-static inline float clamp_f(float val, float min_val, float max_val) {
-    if (val < min_val) return min_val;
-    if (val > max_val) return max_val;
-    return val;
-}
-
-static inline int clamp_i(int val, int min_val, int max_val) {
-    if (val < min_val) return min_val;
-    if (val > max_val) return max_val;
-    return val;
-}
-
-/* --------------------------------------------------------------------------
  * Process a single detection head
  *
  * RKNN RV1106 outputs in NHWC layout via RKNN_QUERY_NATIVE_NHWC_OUTPUT_ATTR:
@@ -519,10 +504,10 @@ int post_process(int8_t *input0, int8_t *input1, int8_t *input2,
         detect_result_t *r = &group->results[i];
 
         /* Scale back to original image coordinates */
-        float x1 = clamp_f(d->x1, 0.0f, (float)model_in_w) / scale_w;
-        float y1 = clamp_f(d->y1, 0.0f, (float)model_in_h) / scale_h;
-        float x2 = clamp_f(d->x2, 0.0f, (float)model_in_w) / scale_w;
-        float y2 = clamp_f(d->y2, 0.0f, (float)model_in_h) / scale_h;
+        float x1 = CLAMP(d->x1, 0.0f, (float)model_in_w) / scale_w;
+        float y1 = CLAMP(d->y1, 0.0f, (float)model_in_h) / scale_h;
+        float x2 = CLAMP(d->x2, 0.0f, (float)model_in_w) / scale_w;
+        float y2 = CLAMP(d->y2, 0.0f, (float)model_in_h) / scale_h;
 
         r->box.left   = (int)(x1 + 0.5f);
         r->box.top    = (int)(y1 + 0.5f);

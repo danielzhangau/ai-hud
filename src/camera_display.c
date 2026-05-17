@@ -37,6 +37,7 @@
 #include "rknn_detect.h"
 #include "overlay_draw.h"
 #include "hud_ipc.h"
+#include "utils.h"
 
 /* --------------------------------------------------------------------------
  * Constants
@@ -94,7 +95,7 @@
 
 /* Framebuffer (for software PiP rendering -- bypasses VO/DRM) */
 #define FB_DEV              "/dev/fb0"
-#define FB_BPP              4                                  /* XRGB8888 */
+/* FB_BPP defined in utils.h (XRGB8888 = 4 bytes) */
 #define FB_STRIDE           (VO_SCREEN_WIDTH * FB_BPP)         /* 1920 */
 #define FB_SIZE             (FB_STRIDE * VO_SCREEN_HEIGHT)     /* 921600 */
 
@@ -369,10 +370,6 @@ static void vpss_deinit(void) {
  * 120x120 XRGB8888, writing directly into the mmap'd framebuffer.
  * -------------------------------------------------------------------------- */
 
-static inline int clamp8(int v) {
-    return v < 0 ? 0 : (v > 255 ? 255 : v);
-}
-
 /*
  * NV12 480x480 -> XRGB fullscreen (480x480) for CAM display mode.
  * Reserves a top-left corner for the Python-rendered menu icon.
@@ -380,7 +377,7 @@ static inline int clamp8(int v) {
  */
 
 /* Top-left pixel region reserved for Python menu icon overlay.
- * Python `_draw_menu_icon()` draws a hamburger menu here (three horizontal
+ * Python `draw_menu_icon()` draws a hamburger menu here (three horizontal
  * lines within ~30px).  Use 40px for padding.  C never overwrites this
  * region; Python `flush_rect(0, 0, 40, 40)` manages it independently. */
 #define GEAR_RESERVE_SIZE   40
@@ -400,9 +397,9 @@ static void nv12_480_to_fullscreen_xrgb(const uint8_t *nv12, uint8_t *fb) {
             int u = uv_plane[uv_off]     - 128;
             int v = uv_plane[uv_off + 1] - 128;
 
-            int r = clamp8(y_val + ((359 * v) >> 8));
-            int g = clamp8(y_val - ((88 * u + 183 * v) >> 8));
-            int b = clamp8(y_val + ((454 * u) >> 8));
+            int r = CLAMP8(y_val + ((359 * v) >> 8));
+            int g = CLAMP8(y_val - ((88 * u + 183 * v) >> 8));
+            int b = CLAMP8(y_val + ((454 * u) >> 8));
 
             int off = (row * w + col) * FB_BPP;
             fb[off]     = (uint8_t)b;

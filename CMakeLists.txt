@@ -138,6 +138,7 @@ set(SOURCES
     src/postprocess.c
     src/frame_capture.c
     src/overlay_draw.c
+    src/hud_ipc.c
 )
 
 # --------------------------------------------------------------------------

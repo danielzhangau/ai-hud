@@ -13,6 +13,7 @@
 
 #include "overlay_draw.h"
 #include "hud_ipc.h"
+#include "utils.h"
 
 #include <string.h>
 #include <stdio.h>
@@ -46,8 +47,7 @@
 #define CHAR_GAP    (1 * FONT_SCALE)             /* 2 px inter-char gap   */
 #define LABEL_PAD   2       /* Padding around label text (pixels)          */
 
-/* XRGB8888 byte order in memory: B(0) G(1) R(2) X(3) */
-#define FB_BPP      4
+/* FB_BPP defined in utils.h (XRGB8888 = 4 bytes) */
 
 /* -----------------------------------------------------------------------
  * Embedded 5x7 bitmap font (digits 0-9, space, '%')

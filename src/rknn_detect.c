@@ -25,11 +25,11 @@
 #include "postprocess.h"
 #include "hud_ipc.h"
 #include "frame_capture.h"
+#include "utils.h"
 
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/time.h>
 #include <unistd.h>
 #include <errno.h>
 
@@ -44,12 +44,6 @@
 /* --------------------------------------------------------------------------
  * Internal helpers
  * -------------------------------------------------------------------------- */
-
-static inline int64_t get_current_time_us(void) {
-    struct timeval tv;
-    gettimeofday(&tv, NULL);
-    return (int64_t)tv.tv_sec * 1000000 + tv.tv_usec;
-}
 
 /*
  * NV12 to RGB888 conversion (software fallback).
@@ -82,9 +76,9 @@ static void nv12_to_rgb(const uint8_t *nv12, uint8_t *rgb,
             int b = y_val + ((454 * u_val) >> 8);
 
             /* Clamp to [0, 255] */
-            if (r < 0) r = 0; else if (r > 255) r = 255;
-            if (g < 0) g = 0; else if (g > 255) g = 255;
-            if (b < 0) b = 0; else if (b > 255) b = 255;
+            r = CLAMP8(r);
+            g = CLAMP8(g);
+            b = CLAMP8(b);
 
             int rgb_idx = y_idx * 3;
             rgb[rgb_idx + 0] = (uint8_t)r;
@@ -385,7 +379,7 @@ int rknn_detect_run(rknn_detect_ctx_t *ctx,
     }
 
     /* ---- Run NPU inference ---- */
-    t0 = get_current_time_us();
+    t0 = time_us();
 
     ret = rknn_run((rknn_context)ctx->rknn_ctx, NULL);
     if (ret < 0) {
@@ -393,7 +387,7 @@ int rknn_detect_run(rknn_detect_ctx_t *ctx,
         return -1;
     }
 
-    t1 = get_current_time_us();
+    t1 = time_us();
 
     /* ---- Post-processing ---- */
     /*
@@ -423,7 +417,7 @@ int rknn_detect_run(rknn_detect_ctx_t *ctx,
                        ctx->out_zps, ctx->out_scales,
                        group);
 
-    t2 = get_current_time_us();
+    t2 = time_us();
 
     /* Update performance counters */
     ctx->last_infer_ms    = (float)(t1 - t0) / 1000.0f;
@@ -516,7 +510,7 @@ static void *inference_thread_func(void *arg) {
         VIDEO_FRAME_S *vf = &frame_info.stVFrame;
         void *frame_vaddr = RK_MPI_MB_Handle2VirAddr(vf->pMbBlk);
 
-        int64_t frame_t0 = get_current_time_us();
+        int64_t frame_t0 = time_us();
 
         if (frame_vaddr) {
             /* Run inference */
@@ -589,7 +583,7 @@ static void *inference_thread_func(void *arg) {
          * Exception: CAM display mode bypasses throttling entirely for
          * real-time detection visualization (~20 FPS on RV1106).
          */
-        int64_t frame_t1 = get_current_time_us();
+        int64_t frame_t1 = time_us();
         float frame_ms = (float)(frame_t1 - frame_t0) / 1000.0f;
 
         /* In CAM mode, skip adaptive sleep for real-time feedback.
