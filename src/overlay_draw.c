@@ -20,23 +20,18 @@
 /* -----------------------------------------------------------------------
  * Coordinate mapping: NPU (640x640) -> Display (480x480)
  *
- * ISP selfpath center-crops 2304x1296 to 1296x1296, resizes to 640x640.
- * VPSS stretches full 2304x1296 to 480x480.
+ * Both paths apply the same non-uniform stretch (no center-crop):
+ *   VI CHN1 selfpath: 2304x1296 -> 640x640 (stretch)
+ *   VPSS CHN0:        2304x1296 -> 480x480 (stretch)
  *
- * Combined transform:
- *   display_x = npu_x * (1296/640 * 480/2304) + (504 * 480/2304)
- *   display_y = npu_y * (1296/640 * 480/1296)
+ * Since both distort the sensor image identically (same aspect mapping),
+ * the transform is a simple uniform scale: 480/640 = 0.75.
  * ----------------------------------------------------------------------- */
 
-#define SENSOR_W    2304
-#define SENSOR_H    1296
-#define CROP_SZ     1296    /* min(W,H) for 1:1 center crop */
 #define NPU_SZ      640
+#define DISPLAY_SZ  480
 
-/* Pre-computed float constants (compiler evaluates at compile time) */
-#define MAP_SX      (1296.0f / 640.0f * 480.0f / 2304.0f)   /* 0.421875  */
-#define MAP_OX      (504.0f * 480.0f / 2304.0f)              /* 104.8958  */
-#define MAP_SY      (1296.0f / 640.0f * 480.0f / 1296.0f)    /* 0.75      */
+#define MAP_SCALE   (480.0f / 640.0f)   /* 0.75 */
 
 /* -----------------------------------------------------------------------
  * Drawing constants
@@ -90,14 +85,14 @@ static int char_to_glyph(char c) {
  * ----------------------------------------------------------------------- */
 
 static inline int map_x(int npu_x, int fb_w) {
-    int dx = (int)((float)npu_x * MAP_SX + MAP_OX + 0.5f);
+    int dx = (int)((float)npu_x * MAP_SCALE + 0.5f);
     if (dx < 0) return 0;
     if (dx >= fb_w) return fb_w - 1;
     return dx;
 }
 
 static inline int map_y(int npu_y, int fb_h) {
-    int dy = (int)((float)npu_y * MAP_SY + 0.5f);
+    int dy = (int)((float)npu_y * MAP_SCALE + 0.5f);
     if (dy < 0) return 0;
     if (dy >= fb_h) return fb_h - 1;
     return dy;
