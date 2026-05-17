@@ -5,8 +5,8 @@
  * Draws directly into mmap'd XRGB8888 framebuffer (/dev/fb0).
  *
  * Coordinate mapping: NPU model space (640x640) -> display (480x480).
- * The ISP selfpath center-crops 2304x1296 to 1296x1296, then resizes
- * to 640x640. VPSS stretches full 2304x1296 to 480x480.
+ * Both VI CHN1 (selfpath) and VPSS stretch 2304x1296 to their target
+ * resolution, so the mapping is a uniform 480/640 = 0.75 scale.
  */
 
 #ifndef OVERLAY_DRAW_H
@@ -25,10 +25,9 @@ extern "C" {
  * Maps detection box coordinates from NPU space (640x640) to display
  * space (480x480), draws colored outlines and speed labels.
  *
- * Box color indicates confidence:
+ * Box color indicates confidence (only >= 0.50 shown):
  *   Green  (>= 0.7)  High confidence
  *   Yellow (>= 0.5)  Medium confidence
- *   Red    (< 0.5)   Low confidence
  *
  * @fb:    Pointer to mmap'd XRGB8888 framebuffer
  * @fb_w:  Framebuffer width in pixels (480)

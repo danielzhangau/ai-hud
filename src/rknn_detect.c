@@ -25,11 +25,11 @@
 #include "postprocess.h"
 #include "hud_ipc.h"
 #include "frame_capture.h"
+#include "utils.h"
 
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/time.h>
 #include <unistd.h>
 #include <errno.h>
 
@@ -44,12 +44,6 @@
 /* --------------------------------------------------------------------------
  * Internal helpers
  * -------------------------------------------------------------------------- */
-
-static inline int64_t get_current_time_us(void) {
-    struct timeval tv;
-    gettimeofday(&tv, NULL);
-    return (int64_t)tv.tv_sec * 1000000 + tv.tv_usec;
-}
 
 /*
  * NV12 to RGB888 conversion (software fallback).
@@ -82,9 +76,9 @@ static void nv12_to_rgb(const uint8_t *nv12, uint8_t *rgb,
             int b = y_val + ((454 * u_val) >> 8);
 
             /* Clamp to [0, 255] */
-            if (r < 0) r = 0; else if (r > 255) r = 255;
-            if (g < 0) g = 0; else if (g > 255) g = 255;
-            if (b < 0) b = 0; else if (b > 255) b = 255;
+            r = CLAMP8(r);
+            g = CLAMP8(g);
+            b = CLAMP8(b);
 
             int rgb_idx = y_idx * 3;
             rgb[rgb_idx + 0] = (uint8_t)r;
@@ -314,6 +308,18 @@ int rknn_detect_run(rknn_detect_ctx_t *ctx,
 
     int model_w = ctx->model_width;
     int model_h = ctx->model_height;
+    static int logged_input_info = 0;
+
+    if (!logged_input_info) {
+        printf("[INFO] Inference input frame: %dx%d NV12, model input: %dx%dx%d\n",
+               width, height, model_w, model_h, ctx->model_channel);
+        if (width != model_w || height != model_h) {
+            printf("[INFO] Inference will resize source frame to model input\n");
+        } else {
+            printf("[INFO] Inference uses direct NV12->RGB conversion without resize\n");
+        }
+        logged_input_info = 1;
+    }
 
     int ret;
     int64_t t0, t1, t2;
@@ -373,7 +379,7 @@ int rknn_detect_run(rknn_detect_ctx_t *ctx,
     }
 
     /* ---- Run NPU inference ---- */
-    t0 = get_current_time_us();
+    t0 = time_us();
 
     ret = rknn_run((rknn_context)ctx->rknn_ctx, NULL);
     if (ret < 0) {
@@ -381,7 +387,7 @@ int rknn_detect_run(rknn_detect_ctx_t *ctx,
         return -1;
     }
 
-    t1 = get_current_time_us();
+    t1 = time_us();
 
     /* ---- Post-processing ---- */
     /*
@@ -392,8 +398,8 @@ int rknn_detect_run(rknn_detect_ctx_t *ctx,
      * to the original frame space. When frame == model size, both are 1.0.
      * When resized (e.g. 480->640), scale = model_dim / frame_dim.
      *
-     * Note: For HUD display we only use class_id and confidence, so
-     * exact box coordinates are not critical.
+     * Note: In CAM display mode, box coordinates are used to render
+     * bounding boxes on screen, so accurate mapping matters.
      */
     float scale_w = (float)model_w / (float)width;
     float scale_h = (float)model_h / (float)height;
@@ -411,7 +417,7 @@ int rknn_detect_run(rknn_detect_ctx_t *ctx,
                        ctx->out_zps, ctx->out_scales,
                        group);
 
-    t2 = get_current_time_us();
+    t2 = time_us();
 
     /* Update performance counters */
     ctx->last_infer_ms    = (float)(t1 - t0) / 1000.0f;
@@ -504,7 +510,7 @@ static void *inference_thread_func(void *arg) {
         VIDEO_FRAME_S *vf = &frame_info.stVFrame;
         void *frame_vaddr = RK_MPI_MB_Handle2VirAddr(vf->pMbBlk);
 
-        int64_t frame_t0 = get_current_time_us();
+        int64_t frame_t0 = time_us();
 
         if (frame_vaddr) {
             /* Run inference */
@@ -530,6 +536,24 @@ static void *inference_thread_func(void *arg) {
                     }
                     hud_ipc_update_from_detections(
                         local_result.count, cls_ids, confs);
+
+#ifndef NDEBUG
+                    /* Debug: log raw box dimensions (NPU 640x640 space) */
+                    static int box_log_count = 0;
+                    if (box_log_count < 20) {
+                        for (int i = 0; i < local_result.count; i++) {
+                            detect_result_t *r = &local_result.results[i];
+                            printf("[DEBUG] det[%d]: cls=%d conf=%.2f "
+                                   "box=(%d,%d)-(%d,%d) size=%dx%d\n",
+                                   i, r->class_id, r->prop,
+                                   r->box.left, r->box.top,
+                                   r->box.right, r->box.bottom,
+                                   r->box.right - r->box.left,
+                                   r->box.bottom - r->box.top);
+                        }
+                        box_log_count++;
+                    }
+#endif
                 }
 
                 /* Data capture: save frame for model iteration */
@@ -555,9 +579,37 @@ static void *inference_thread_func(void *arg) {
          * At 0-5 km/h (parked), inference runs every ~5s to save power.
          * At 100+ km/h (highway), inference runs every ~200ms for
          * timely construction zone / camera detection.
+         *
+         * Exception: CAM display mode bypasses throttling entirely for
+         * real-time detection visualization (~20 FPS on RV1106).
          */
-        int64_t frame_t1 = get_current_time_us();
+        int64_t frame_t1 = time_us();
         float frame_ms = (float)(frame_t1 - frame_t0) / 1000.0f;
+
+        /* In CAM mode, skip adaptive sleep for real-time feedback.
+         * Cache the check (~1s refresh) to avoid per-frame syscall.
+         * Uses fopen+content check (matching camera_display.c) so
+         * future display modes beyond "cam"/"hud" are handled correctly. */
+        static int cached_cam_mode = 0;
+        static int cam_check_ctr = 0;
+        if (++cam_check_ctr >= 15) {
+            FILE *dm_fp = fopen(HUD_IPC_DISPLAY_MODE, "r");
+            if (dm_fp) {
+                char dm_buf[8] = {0};
+                fread(dm_buf, 1, sizeof(dm_buf) - 1, dm_fp);
+                fclose(dm_fp);
+                cached_cam_mode = (dm_buf[0] == 'c');
+            } else {
+                cached_cam_mode = 0;
+            }
+            cam_check_ctr = 0;
+        }
+        if (cached_cam_mode) {
+            /* Minimal yield to avoid starving other threads */
+            usleep(10 * 1000);  /* 10ms */
+            continue;
+        }
+
         float speed_kmh = hud_ipc_read_speed();
         int sleep_ms = hud_ipc_adaptive_sleep_ms(speed_kmh, frame_ms);
 

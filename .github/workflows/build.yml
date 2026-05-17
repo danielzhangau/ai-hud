@@ -35,7 +35,7 @@ jobs:
 
       - name: Generate HUD mockups
         run: |
-          cd src
+          cd tools
           python3 generate_hud_mockups_v3.py
           python3 generate_splash.py
 

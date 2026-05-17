@@ -6,13 +6,14 @@
  *
  * Features:
  *   - NPU (640x640) -> Display (480x480) coordinate mapping
- *   - Confidence-colored bounding box outlines (green/yellow/red)
+ *   - Confidence-colored bounding box outlines (green/yellow, >= 0.50 only)
  *   - Embedded 5x7 bitmap font at 2x scale for speed labels
  *   - Label format: "60 85%" (speed value + confidence)
  */
 
 #include "overlay_draw.h"
 #include "hud_ipc.h"
+#include "utils.h"
 
 #include <string.h>
 #include <stdio.h>
@@ -20,23 +21,18 @@
 /* -----------------------------------------------------------------------
  * Coordinate mapping: NPU (640x640) -> Display (480x480)
  *
- * ISP selfpath center-crops 2304x1296 to 1296x1296, resizes to 640x640.
- * VPSS stretches full 2304x1296 to 480x480.
+ * Both paths apply the same non-uniform stretch (no center-crop):
+ *   VI CHN1 selfpath: 2304x1296 -> 640x640 (stretch)
+ *   VPSS CHN0:        2304x1296 -> 480x480 (stretch)
  *
- * Combined transform:
- *   display_x = npu_x * (1296/640 * 480/2304) + (504 * 480/2304)
- *   display_y = npu_y * (1296/640 * 480/1296)
+ * Since both distort the sensor image identically (same aspect mapping),
+ * the transform is a simple uniform scale: 480/640 = 0.75.
  * ----------------------------------------------------------------------- */
 
-#define SENSOR_W    2304
-#define SENSOR_H    1296
-#define CROP_SZ     1296    /* min(W,H) for 1:1 center crop */
 #define NPU_SZ      640
+#define DISPLAY_SZ  480
 
-/* Pre-computed float constants (compiler evaluates at compile time) */
-#define MAP_SX      (1296.0f / 640.0f * 480.0f / 2304.0f)   /* 0.421875  */
-#define MAP_OX      (504.0f * 480.0f / 2304.0f)              /* 104.8958  */
-#define MAP_SY      (1296.0f / 640.0f * 480.0f / 1296.0f)    /* 0.75      */
+#define MAP_SCALE   ((float)DISPLAY_SZ / (float)NPU_SZ)   /* 0.75 */
 
 /* -----------------------------------------------------------------------
  * Drawing constants
@@ -51,8 +47,7 @@
 #define CHAR_GAP    (1 * FONT_SCALE)             /* 2 px inter-char gap   */
 #define LABEL_PAD   2       /* Padding around label text (pixels)          */
 
-/* XRGB8888 byte order in memory: B(0) G(1) R(2) X(3) */
-#define FB_BPP      4
+/* FB_BPP defined in utils.h (XRGB8888 = 4 bytes) */
 
 /* -----------------------------------------------------------------------
  * Embedded 5x7 bitmap font (digits 0-9, space, '%')
@@ -90,14 +85,14 @@ static int char_to_glyph(char c) {
  * ----------------------------------------------------------------------- */
 
 static inline int map_x(int npu_x, int fb_w) {
-    int dx = (int)((float)npu_x * MAP_SX + MAP_OX + 0.5f);
+    int dx = (int)((float)npu_x * MAP_SCALE + 0.5f);
     if (dx < 0) return 0;
     if (dx >= fb_w) return fb_w - 1;
     return dx;
 }
 
 static inline int map_y(int npu_y, int fb_h) {
-    int dy = (int)((float)npu_y * MAP_SY + 0.5f);
+    int dy = (int)((float)npu_y * MAP_SCALE + 0.5f);
     if (dy < 0) return 0;
     if (dy >= fb_h) return fb_h - 1;
     return dy;
@@ -235,19 +230,27 @@ static void draw_string(uint8_t *fb, int fb_w, int fb_h,
 }
 
 /* -----------------------------------------------------------------------
- * Confidence -> color mapping
+ * Display confidence threshold
+ *
+ * Detections below this threshold are hidden in CAM overlay to reduce
+ * visual noise. The inference-level BOX_THRESH (0.40) in postprocess.h
+ * is preserved so HUD IPC still receives lower-confidence results for
+ * GPS fusion logic in hud_live.py.
+ * ----------------------------------------------------------------------- */
+
+#define DISPLAY_CONF_THRESH  0.50f
+
+/* -----------------------------------------------------------------------
+ * Confidence -> color mapping (only two tiers after display threshold)
  * ----------------------------------------------------------------------- */
 
 static void confidence_color(float conf, uint8_t *r, uint8_t *g, uint8_t *b) {
     if (conf >= 0.70f) {
         /* Green: high confidence */
         *r = 0;   *g = 255; *b = 0;
-    } else if (conf >= 0.50f) {
-        /* Yellow: medium confidence */
-        *r = 255; *g = 255; *b = 0;
     } else {
-        /* Red: low confidence */
-        *r = 255; *g = 50;  *b = 50;
+        /* Yellow: medium confidence (>= DISPLAY_CONF_THRESH) */
+        *r = 255; *g = 255; *b = 0;
     }
 }
 
@@ -260,7 +263,11 @@ void overlay_draw_detections(uint8_t *fb, int fb_w, int fb_h,
     if (!fb || !dets || dets->count <= 0)
         return;
 
-    for (int i = 0; i < dets->count; i++) {
+    int count = dets->count;
+    if (count > OBJ_NUMB_MAX_SIZE)
+        count = OBJ_NUMB_MAX_SIZE;
+
+    for (int i = 0; i < count; i++) {
         const detect_result_t *d = &dets->results[i];
 
         /* Map bbox from NPU space (640x640) to display space (480x480) */
@@ -271,6 +278,10 @@ void overlay_draw_detections(uint8_t *fb, int fb_w, int fb_h,
 
         /* Skip degenerate boxes */
         if (dx1 - dx0 < 2 || dy1 - dy0 < 2)
+            continue;
+
+        /* Skip low-confidence detections (kept in IPC for GPS fusion) */
+        if (d->prop < DISPLAY_CONF_THRESH)
             continue;
 
         /* Box color from confidence */
@@ -297,6 +308,10 @@ void overlay_draw_detections(uint8_t *fb, int fb_w, int fb_h,
         /* If label would go above the screen, place it below the box */
         if (lbl_y < 0)
             lbl_y = dy1 + LABEL_PAD;
+        if (lbl_y + lbl_h + LABEL_PAD >= fb_h)
+            lbl_y = fb_h - lbl_h - LABEL_PAD - 1;
+        if (lbl_y < LABEL_PAD)
+            lbl_y = LABEL_PAD;
 
         /* Clamp label X to stay on screen */
         if (lbl_x + lbl_w + LABEL_PAD > fb_w)

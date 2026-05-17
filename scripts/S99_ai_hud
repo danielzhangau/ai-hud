@@ -17,6 +17,7 @@
 
 AI_HUD="/root/ai-hud"
 AI_HUD_MODEL="/root/model/speed_signs_rv1106.rknn"
+AI_HUD_MODEL_FALLBACK="/root/model/au_speed_signs_rv1106.rknn"
 AI_HUD_PIDFILE="/var/run/ai_hud_c.pid"
 
 HUD_PY="/root/hud_live.py"
@@ -125,16 +126,24 @@ safe_kill() {
 # Watchdog loop: restart process on crash
 watchdog_c() {
     while true; do
-        if [ -x "$AI_HUD" ] && [ -f "$AI_HUD_MODEL" ]; then
-            "$AI_HUD" --model "$AI_HUD_MODEL" >> "$LOGFILE_C" 2>&1 &
+        _model=""
+        if [ -f "$AI_HUD_MODEL" ]; then
+            _model="$AI_HUD_MODEL"
+        elif [ -f "$AI_HUD_MODEL_FALLBACK" ]; then
+            _model="$AI_HUD_MODEL_FALLBACK"
+        fi
+
+        if [ -x "$AI_HUD" ] && [ -n "$_model" ]; then
+            "$AI_HUD" --model "$_model" >> "$LOGFILE_C" 2>&1 &
             _pid=$!
             echo "$_pid" > "$AI_HUD_PIDFILE"
-            log "ai-hud started PID=$_pid (with model)"
+            log "ai-hud started PID=$_pid (with model: $_model)"
             wait "$_pid"
         elif [ -x "$AI_HUD" ]; then
             "$AI_HUD" >> "$LOGFILE_C" 2>&1 &
             _pid=$!
             echo "$_pid" > "$AI_HUD_PIDFILE"
+            log "WARNING: model not found ($AI_HUD_MODEL or $AI_HUD_MODEL_FALLBACK)"
             log "ai-hud started PID=$_pid (display-only)"
             wait "$_pid"
         else

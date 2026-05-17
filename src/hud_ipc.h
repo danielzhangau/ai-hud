@@ -32,10 +32,13 @@
 /* Python -> C: NPU enable/disable toggle (content: "1" or "0") */
 #define HUD_IPC_NPU_ENABLE_FILE "/tmp/ai_hud_npu_enable"
 
+/* Python -> C: display mode ("cam\n" = camera, file absent = HUD) */
+#define HUD_IPC_DISPLAY_MODE "/tmp/ai_hud_display_mode"
+
 /* Universal speed limit classes (matching postprocess.h class order)
  * 11 classes covering both AU and CN speed limits.
  * Device-side region filtering is handled in Python (hud_live.py). */
-static const int SIGN_SPEEDS[] = {20, 30, 40, 50, 60, 70, 80, 90, 100, 110, 120};
+extern const int SIGN_SPEEDS[];
 #define SIGN_SPEED_COUNT  11
 #define CLASS_SPEED_CAMERA -1  /* Speed camera detected via GPS database, not vision */
 

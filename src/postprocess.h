@@ -34,8 +34,22 @@ extern "C" {
 #endif
 
 #define NMS_THRESH          0.45f   /* IoU threshold for NMS             */
+#define NMS_CONTAINMENT     0.60f   /* Containment threshold for nested boxes */
 #define BOX_THRESH          0.40f   /* Object confidence threshold (conservative) */
 #define PROP_BOX_SIZE       (5 + OBJ_CLASS_NUM)  /* 4 coords + 1 obj + classes */
+
+/*
+ * For mutually exclusive sign classes, suppress overlapping boxes across
+ * different classes so one physical sign does not appear as nested boxes.
+ * Keep class-aware NMS for generic multi-object datasets.
+ */
+#ifndef NMS_CLASS_AGNOSTIC
+#if OBJ_CLASS_NUM == 11
+#define NMS_CLASS_AGNOSTIC 1
+#else
+#define NMS_CLASS_AGNOSTIC 0
+#endif
+#endif
 
 /* YOLOv5 has 3 detection heads with 3 anchors each */
 #define NUM_ANCHORS         3

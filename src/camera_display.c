@@ -36,6 +36,8 @@
 #include "isp_control.h"
 #include "rknn_detect.h"
 #include "overlay_draw.h"
+#include "hud_ipc.h"
+#include "utils.h"
 
 /* --------------------------------------------------------------------------
  * Constants
@@ -93,7 +95,7 @@
 
 /* Framebuffer (for software PiP rendering -- bypasses VO/DRM) */
 #define FB_DEV              "/dev/fb0"
-#define FB_BPP              4                                  /* XRGB8888 */
+/* FB_BPP defined in utils.h (XRGB8888 = 4 bytes) */
 #define FB_STRIDE           (VO_SCREEN_WIDTH * FB_BPP)         /* 1920 */
 #define FB_SIZE             (FB_STRIDE * VO_SCREEN_HEIGHT)     /* 921600 */
 
@@ -368,19 +370,16 @@ static void vpss_deinit(void) {
  * 120x120 XRGB8888, writing directly into the mmap'd framebuffer.
  * -------------------------------------------------------------------------- */
 
-static inline int clamp8(int v) {
-    return v < 0 ? 0 : (v > 255 ? 255 : v);
-}
-
 /*
  * NV12 480x480 -> XRGB fullscreen (480x480) for CAM display mode.
- * Reserves a top-left corner for the Python-rendered settings gear icon.
+ * Reserves a top-left corner for the Python-rendered menu icon.
  * BT.601 full-range conversion, integer fixed-point arithmetic.
  */
 
-/* Top-left pixel region reserved for Python gear icon overlay.
- * Gear center (18,18) with 8px teeth radius + 3px tooth size = ~29px max.
- * Use 40px for padding.  Python draws gear here; C never overwrites it. */
+/* Top-left pixel region reserved for Python menu icon overlay.
+ * Python `draw_menu_icon()` draws a hamburger menu here (three horizontal
+ * lines within ~30px).  Use 40px for padding.  C never overwrites this
+ * region; Python `flush_rect(0, 0, 40, 40)` manages it independently. */
 #define GEAR_RESERVE_SIZE   40
 
 static void nv12_480_to_fullscreen_xrgb(const uint8_t *nv12, uint8_t *fb) {
@@ -398,9 +397,9 @@ static void nv12_480_to_fullscreen_xrgb(const uint8_t *nv12, uint8_t *fb) {
             int u = uv_plane[uv_off]     - 128;
             int v = uv_plane[uv_off + 1] - 128;
 
-            int r = clamp8(y_val + ((359 * v) >> 8));
-            int g = clamp8(y_val - ((88 * u + 183 * v) >> 8));
-            int b = clamp8(y_val + ((454 * u) >> 8));
+            int r = CLAMP8(y_val + ((359 * v) >> 8));
+            int g = CLAMP8(y_val - ((88 * u + 183 * v) >> 8));
+            int b = CLAMP8(y_val + ((454 * u) >> 8));
 
             int off = (row * w + col) * FB_BPP;
             fb[off]     = (uint8_t)b;
@@ -417,7 +416,7 @@ static void nv12_480_to_fullscreen_xrgb(const uint8_t *nv12, uint8_t *fb) {
  * When settings overlay is active, /tmp/ai_hud_pip_hide exists and
  * camera rendering is paused regardless of display mode.
  */
-#define DISPLAY_MODE_IPC   "/tmp/ai_hud_display_mode"
+#define DISPLAY_MODE_IPC   HUD_IPC_DISPLAY_MODE
 #define PIP_HIDE_IPC       "/tmp/ai_hud_pip_hide"
 
 static int read_display_mode_cam(void) {
@@ -569,29 +568,17 @@ static int vo_init(void) {
     }
 
     /* ---- VO layer (GRAPHIC mode + RGA splice, matching official demo) ---- */
+    /* Note: vo_init() is only called when g_pip_mode == 0 (see main()),
+     * so this is always the full-screen path. */
     VO_VIDEO_LAYER_ATTR_S layer_attr;
     memset(&layer_attr, 0, sizeof(layer_attr));
 
-    if (g_pip_mode) {
-        /* PiP: camera scaled to small window at bottom-right corner.
-         * stDispRect  = physical position/size on screen (VO hardware scales).
-         * stImageSize = virtual canvas matching VPSS output (480x480).
-         * VO hardware scales the 480x480 canvas down to 120x120 on screen. */
-        layer_attr.stDispRect.s32X      = PIP_X;
-        layer_attr.stDispRect.s32Y      = PIP_Y;
-        layer_attr.stDispRect.u32Width  = PIP_SIZE;
-        layer_attr.stDispRect.u32Height = PIP_SIZE;
-        layer_attr.stImageSize.u32Width  = DISPLAY_WIDTH;
-        layer_attr.stImageSize.u32Height = DISPLAY_HEIGHT;
-    } else {
-        /* Full-screen camera preview */
-        layer_attr.stDispRect.s32X      = 0;
-        layer_attr.stDispRect.s32Y      = 0;
-        layer_attr.stDispRect.u32Width  = VO_SCREEN_WIDTH;
-        layer_attr.stDispRect.u32Height = VO_SCREEN_HEIGHT;
-        layer_attr.stImageSize.u32Width  = VO_SCREEN_WIDTH;
-        layer_attr.stImageSize.u32Height = VO_SCREEN_HEIGHT;
-    }
+    layer_attr.stDispRect.s32X      = 0;
+    layer_attr.stDispRect.s32Y      = 0;
+    layer_attr.stDispRect.u32Width  = VO_SCREEN_WIDTH;
+    layer_attr.stDispRect.u32Height = VO_SCREEN_HEIGHT;
+    layer_attr.stImageSize.u32Width  = VO_SCREEN_WIDTH;
+    layer_attr.stImageSize.u32Height = VO_SCREEN_HEIGHT;
     layer_attr.enPixFormat           = RK_FMT_RGB888;
     layer_attr.enCompressMode        = COMPRESS_AFBC_16x16;
     layer_attr.u32DispFrmRt          = TARGET_FPS;
@@ -614,8 +601,7 @@ static int vo_init(void) {
     /* ---- VO channel (fills the layer area) ---- */
     VO_CHN_ATTR_S chn_attr;
     memset(&chn_attr, 0, sizeof(chn_attr));
-    /* Channel rect fills the layer's virtual canvas (stImageSize).
-     * In both modes stImageSize = 480x480, so channel is always full-canvas. */
+    /* Channel rect fills the layer's virtual canvas (stImageSize = 480x480). */
     chn_attr.stRect.s32X      = 0;
     chn_attr.stRect.s32Y      = 0;
     chn_attr.stRect.u32Width  = DISPLAY_WIDTH;
@@ -636,16 +622,9 @@ static int vo_init(void) {
         return ret;
     }
 
-    if (g_pip_mode) {
-        printf("[INFO] VO initialized (PiP): dev=%d, layer=%d, chn=%d, "
-               "%dx%d at (%d,%d) @ %dfps\n",
-               VO_DEV_ID, VO_LAYER_ID, VO_CHN_ID,
-               PIP_SIZE, PIP_SIZE, PIP_X, PIP_Y, TARGET_FPS);
-    } else {
-        printf("[INFO] VO initialized: dev=%d, layer=%d, chn=%d, %dx%d @ %dfps\n",
-               VO_DEV_ID, VO_LAYER_ID, VO_CHN_ID,
-               VO_SCREEN_WIDTH, VO_SCREEN_HEIGHT, TARGET_FPS);
-    }
+    printf("[INFO] VO initialized: dev=%d, layer=%d, chn=%d, %dx%d @ %dfps\n",
+           VO_DEV_ID, VO_LAYER_ID, VO_CHN_ID,
+           VO_SCREEN_WIDTH, VO_SCREEN_HEIGHT, TARGET_FPS);
     return 0;
 }
 
