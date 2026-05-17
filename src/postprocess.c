@@ -245,7 +245,7 @@ static void quicksort(raw_detection_t *arr, int low, int high) {
 }
 
 /* --------------------------------------------------------------------------
- * NMS (Non-Maximum Suppression) -- per-class
+ * NMS (Non-Maximum Suppression)
  * -------------------------------------------------------------------------- */
 
 static int nms(raw_detection_t *dets, int count, float nms_threshold,
@@ -280,9 +280,11 @@ static int nms(raw_detection_t *dets, int count, float nms_threshold,
         for (int j = i + 1; j < count; j++) {
             if (suppressed[j])
                 continue;
-            /* Only suppress same-class detections */
+#if !NMS_CLASS_AGNOSTIC
+            /* Class-aware NMS for datasets where different classes may overlap */
             if (dets[i].class_id != dets[j].class_id)
                 continue;
+#endif
 
             float iou = calculate_overlap(
                 dets[i].x1, dets[i].y1, dets[i].x2, dets[i].y2,

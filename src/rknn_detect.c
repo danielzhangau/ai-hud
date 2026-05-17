@@ -314,6 +314,18 @@ int rknn_detect_run(rknn_detect_ctx_t *ctx,
 
     int model_w = ctx->model_width;
     int model_h = ctx->model_height;
+    static int logged_input_info = 0;
+
+    if (!logged_input_info) {
+        printf("[INFO] Inference input frame: %dx%d NV12, model input: %dx%dx%d\n",
+               width, height, model_w, model_h, ctx->model_channel);
+        if (width != model_w || height != model_h) {
+            printf("[INFO] Inference will resize source frame to model input\n");
+        } else {
+            printf("[INFO] Inference uses direct NV12->RGB conversion without resize\n");
+        }
+        logged_input_info = 1;
+    }
 
     int ret;
     int64_t t0, t1, t2;
