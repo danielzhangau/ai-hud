@@ -34,6 +34,7 @@ extern "C" {
 #endif
 
 #define NMS_THRESH          0.45f   /* IoU threshold for NMS             */
+#define NMS_CONTAINMENT     0.60f   /* Containment threshold for nested boxes */
 #define BOX_THRESH          0.40f   /* Object confidence threshold (conservative) */
 #define PROP_BOX_SIZE       (5 + OBJ_CLASS_NUM)  /* 4 coords + 1 obj + classes */
 
