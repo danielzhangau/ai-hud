@@ -33,13 +33,6 @@
 
 #define MAP_SCALE   (480.0f / 640.0f)   /* 0.75 */
 
-/*
- * Box shrink factor: tighten displayed boxes by shrinking each edge inward.
- * YOLOv5 + CIoU loss naturally predicts slightly generous boxes.
- * 0.85 means display box is 85% of predicted size (7.5% trimmed per side).
- */
-#define BOX_SHRINK  0.85f
-
 /* -----------------------------------------------------------------------
  * Drawing constants
  * ----------------------------------------------------------------------- */
@@ -274,16 +267,6 @@ void overlay_draw_detections(uint8_t *fb, int fb_w, int fb_h,
         int dy0 = map_y(d->box.top,    fb_h);
         int dx1 = map_x(d->box.right,  fb_w);
         int dy1 = map_y(d->box.bottom, fb_h);
-
-        /* Shrink box toward center to tighten fit around target */
-        int cx = (dx0 + dx1) / 2;
-        int cy = (dy0 + dy1) / 2;
-        int hw = (int)((float)(dx1 - dx0) * BOX_SHRINK * 0.5f);
-        int hh = (int)((float)(dy1 - dy0) * BOX_SHRINK * 0.5f);
-        dx0 = cx - hw;
-        dy0 = cy - hh;
-        dx1 = cx + hw;
-        dy1 = cy + hh;
 
         /* Skip degenerate boxes */
         if (dx1 - dx0 < 2 || dy1 - dy0 < 2)

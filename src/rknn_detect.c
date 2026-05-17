@@ -542,6 +542,22 @@ static void *inference_thread_func(void *arg) {
                     }
                     hud_ipc_update_from_detections(
                         local_result.count, cls_ids, confs);
+
+                    /* Debug: log raw box dimensions (NPU 640x640 space) */
+                    static int box_log_count = 0;
+                    if (box_log_count < 20) {
+                        for (int i = 0; i < local_result.count; i++) {
+                            detect_result_t *r = &local_result.results[i];
+                            printf("[DBG] det[%d]: cls=%d conf=%.2f "
+                                   "box=(%d,%d)-(%d,%d) size=%dx%d\n",
+                                   i, r->class_id, r->prop,
+                                   r->box.left, r->box.top,
+                                   r->box.right, r->box.bottom,
+                                   r->box.right - r->box.left,
+                                   r->box.bottom - r->box.top);
+                        }
+                        box_log_count++;
+                    }
                 }
 
                 /* Data capture: save frame for model iteration */
