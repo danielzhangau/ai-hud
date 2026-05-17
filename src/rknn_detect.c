@@ -543,12 +543,13 @@ static void *inference_thread_func(void *arg) {
                     hud_ipc_update_from_detections(
                         local_result.count, cls_ids, confs);
 
+#ifndef NDEBUG
                     /* Debug: log raw box dimensions (NPU 640x640 space) */
                     static int box_log_count = 0;
                     if (box_log_count < 20) {
                         for (int i = 0; i < local_result.count; i++) {
                             detect_result_t *r = &local_result.results[i];
-                            printf("[DBG] det[%d]: cls=%d conf=%.2f "
+                            printf("[DEBUG] det[%d]: cls=%d conf=%.2f "
                                    "box=(%d,%d)-(%d,%d) size=%dx%d\n",
                                    i, r->class_id, r->prop,
                                    r->box.left, r->box.top,
@@ -558,6 +559,7 @@ static void *inference_thread_func(void *arg) {
                         }
                         box_log_count++;
                     }
+#endif
                 }
 
                 /* Data capture: save frame for model iteration */
@@ -590,9 +592,15 @@ static void *inference_thread_func(void *arg) {
         int64_t frame_t1 = get_current_time_us();
         float frame_ms = (float)(frame_t1 - frame_t0) / 1000.0f;
 
-        /* In CAM mode, skip adaptive sleep for real-time feedback */
-        int is_cam_mode = (access("/tmp/ai_hud_display_mode", F_OK) == 0);
-        if (is_cam_mode) {
+        /* In CAM mode, skip adaptive sleep for real-time feedback.
+         * Cache the check (~1s refresh) to avoid per-frame syscall. */
+        static int cached_cam_mode = 0;
+        static int cam_check_ctr = 0;
+        if (++cam_check_ctr >= 15) {
+            cached_cam_mode = (access(HUD_IPC_DISPLAY_MODE, F_OK) == 0);
+            cam_check_ctr = 0;
+        }
+        if (cached_cam_mode) {
             /* Minimal yield to avoid starving other threads */
             usleep(10 * 1000);  /* 10ms */
             continue;

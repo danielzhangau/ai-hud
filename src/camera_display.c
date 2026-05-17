@@ -417,7 +417,7 @@ static void nv12_480_to_fullscreen_xrgb(const uint8_t *nv12, uint8_t *fb) {
  * When settings overlay is active, /tmp/ai_hud_pip_hide exists and
  * camera rendering is paused regardless of display mode.
  */
-#define DISPLAY_MODE_IPC   "/tmp/ai_hud_display_mode"
+#define DISPLAY_MODE_IPC   HUD_IPC_DISPLAY_MODE
 #define PIP_HIDE_IPC       "/tmp/ai_hud_pip_hide"
 
 static int read_display_mode_cam(void) {

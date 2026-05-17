@@ -31,7 +31,7 @@
 #define NPU_SZ      640
 #define DISPLAY_SZ  480
 
-#define MAP_SCALE   (480.0f / 640.0f)   /* 0.75 */
+#define MAP_SCALE   ((float)DISPLAY_SZ / (float)NPU_SZ)   /* 0.75 */
 
 /* -----------------------------------------------------------------------
  * Drawing constants

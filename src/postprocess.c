@@ -142,57 +142,31 @@ static inline int8_t qnt_threshold(float threshold, int32_t zp, float scale) {
  * IoU (Intersection over Union) calculation
  * -------------------------------------------------------------------------- */
 
-static float calculate_overlap(float x1_min, float y1_min, float x1_max, float y1_max,
-                                float x2_min, float y2_min, float x2_max, float y2_max) {
-    float inter_x_min = (x1_min > x2_min) ? x1_min : x2_min;
-    float inter_y_min = (y1_min > y2_min) ? y1_min : y2_min;
-    float inter_x_max = (x1_max < x2_max) ? x1_max : x2_max;
-    float inter_y_max = (y1_max < y2_max) ? y1_max : y2_max;
+/*
+ * Compute intersection area and individual box areas in one pass.
+ * Shared by IoU and containment checks to avoid redundant work in
+ * the O(n^2) NMS inner loop.
+ */
+static inline void compute_areas(float x1_min, float y1_min, float x1_max, float y1_max,
+                                  float x2_min, float y2_min, float x2_max, float y2_max,
+                                  float *inter_out, float *a1_out, float *a2_out) {
+    float inter_w = ((x1_max < x2_max) ? x1_max : x2_max) -
+                    ((x1_min > x2_min) ? x1_min : x2_min);
+    float inter_h = ((y1_max < y2_max) ? y1_max : y2_max) -
+                    ((y1_min > y2_min) ? y1_min : y2_min);
 
-    float inter_w = inter_x_max - inter_x_min;
-    float inter_h = inter_y_max - inter_y_min;
-
-    if (inter_w <= 0.0f || inter_h <= 0.0f)
-        return 0.0f;
-
-    float inter_area = inter_w * inter_h;
-    float area1 = (x1_max - x1_min) * (y1_max - y1_min);
-    float area2 = (x2_max - x2_min) * (y2_max - y2_min);
-    float union_area = area1 + area2 - inter_area;
-
-    if (union_area <= 0.0f)
-        return 0.0f;
-
-    return inter_area / union_area;
+    *inter_out = (inter_w > 0.0f && inter_h > 0.0f) ? inter_w * inter_h : 0.0f;
+    *a1_out = (x1_max - x1_min) * (y1_max - y1_min);
+    *a2_out = (x2_max - x2_min) * (y2_max - y2_min);
 }
 
-/*
- * Containment ratio: intersection / min(area1, area2).
- * Detects nested boxes where a smaller box sits inside a larger one.
- * Standard IoU fails here because union is dominated by the larger box.
- */
-static float calculate_containment(float x1_min, float y1_min, float x1_max, float y1_max,
-                                    float x2_min, float y2_min, float x2_max, float y2_max) {
-    float inter_x_min = (x1_min > x2_min) ? x1_min : x2_min;
-    float inter_y_min = (y1_min > y2_min) ? y1_min : y2_min;
-    float inter_x_max = (x1_max < x2_max) ? x1_max : x2_max;
-    float inter_y_max = (y1_max < y2_max) ? y1_max : y2_max;
-
-    float inter_w = inter_x_max - inter_x_min;
-    float inter_h = inter_y_max - inter_y_min;
-
-    if (inter_w <= 0.0f || inter_h <= 0.0f)
-        return 0.0f;
-
-    float inter_area = inter_w * inter_h;
-    float area1 = (x1_max - x1_min) * (y1_max - y1_min);
-    float area2 = (x2_max - x2_min) * (y2_max - y2_min);
-    float min_area = (area1 < area2) ? area1 : area2;
-
-    if (min_area <= 0.0f)
-        return 0.0f;
-
-    return inter_area / min_area;
+static float calculate_overlap(float x1_min, float y1_min, float x1_max, float y1_max,
+                                float x2_min, float y2_min, float x2_max, float y2_max) {
+    float inter, a1, a2;
+    compute_areas(x1_min, y1_min, x1_max, y1_max,
+                  x2_min, y2_min, x2_max, y2_max, &inter, &a1, &a2);
+    float u = a1 + a2 - inter;
+    return (u > 0.0f) ? inter / u : 0.0f;
 }
 
 /* --------------------------------------------------------------------------
@@ -315,11 +289,14 @@ static int nms(raw_detection_t *dets, int count, float nms_threshold,
                 continue;
 #endif
 
-            float iou = calculate_overlap(
-                dets[i].x1, dets[i].y1, dets[i].x2, dets[i].y2,
-                dets[j].x1, dets[j].y1, dets[j].x2, dets[j].y2);
+            float inter, a1, a2;
+            compute_areas(dets[i].x1, dets[i].y1, dets[i].x2, dets[i].y2,
+                          dets[j].x1, dets[j].y1, dets[j].x2, dets[j].y2,
+                          &inter, &a1, &a2);
 
-            if (iou > nms_threshold) {
+            /* IoU check */
+            float u = a1 + a2 - inter;
+            if (u > 0.0f && inter / u > nms_threshold) {
                 suppressed[j] = 1;
                 continue;
             }
@@ -329,13 +306,9 @@ static int nms(raw_detection_t *dets, int count, float nms_threshold,
              * Containment check: suppress nested boxes that IoU misses.
              * When a small box sits inside a large box (different anchors),
              * IoU can be low (e.g. 0.36) but containment is high (>0.7).
-             * Threshold 0.6: intersection covers 60%+ of the smaller box.
              */
-            float containment = calculate_containment(
-                dets[i].x1, dets[i].y1, dets[i].x2, dets[i].y2,
-                dets[j].x1, dets[j].y1, dets[j].x2, dets[j].y2);
-
-            if (containment > NMS_CONTAINMENT)
+            float min_a = (a1 < a2) ? a1 : a2;
+            if (min_a > 0.0f && inter / min_a > NMS_CONTAINMENT)
                 suppressed[j] = 1;
 #endif
         }
