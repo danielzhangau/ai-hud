@@ -6,7 +6,7 @@
  *
  * Features:
  *   - NPU (640x640) -> Display (480x480) coordinate mapping
- *   - Confidence-colored bounding box outlines (green/yellow/red)
+ *   - Confidence-colored bounding box outlines (green/yellow, >= 0.50 only)
  *   - Embedded 5x7 bitmap font at 2x scale for speed labels
  *   - Label format: "60 85%" (speed value + confidence)
  */
@@ -230,19 +230,27 @@ static void draw_string(uint8_t *fb, int fb_w, int fb_h,
 }
 
 /* -----------------------------------------------------------------------
- * Confidence -> color mapping
+ * Display confidence threshold
+ *
+ * Detections below this threshold are hidden in CAM overlay to reduce
+ * visual noise. The inference-level BOX_THRESH (0.40) in postprocess.h
+ * is preserved so HUD IPC still receives lower-confidence results for
+ * GPS fusion logic in hud_live.py.
+ * ----------------------------------------------------------------------- */
+
+#define DISPLAY_CONF_THRESH  0.50f
+
+/* -----------------------------------------------------------------------
+ * Confidence -> color mapping (only two tiers after display threshold)
  * ----------------------------------------------------------------------- */
 
 static void confidence_color(float conf, uint8_t *r, uint8_t *g, uint8_t *b) {
     if (conf >= 0.70f) {
         /* Green: high confidence */
         *r = 0;   *g = 255; *b = 0;
-    } else if (conf >= 0.50f) {
-        /* Yellow: medium confidence */
-        *r = 255; *g = 255; *b = 0;
     } else {
-        /* Red: low confidence */
-        *r = 255; *g = 50;  *b = 50;
+        /* Yellow: medium confidence (>= DISPLAY_CONF_THRESH) */
+        *r = 255; *g = 255; *b = 0;
     }
 }
 
@@ -270,6 +278,10 @@ void overlay_draw_detections(uint8_t *fb, int fb_w, int fb_h,
 
         /* Skip degenerate boxes */
         if (dx1 - dx0 < 2 || dy1 - dy0 < 2)
+            continue;
+
+        /* Skip low-confidence detections (kept in IPC for GPS fusion) */
+        if (d->prop < DISPLAY_CONF_THRESH)
             continue;
 
         /* Box color from confidence */

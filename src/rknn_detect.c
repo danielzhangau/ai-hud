@@ -404,8 +404,8 @@ int rknn_detect_run(rknn_detect_ctx_t *ctx,
      * to the original frame space. When frame == model size, both are 1.0.
      * When resized (e.g. 480->640), scale = model_dim / frame_dim.
      *
-     * Note: For HUD display we only use class_id and confidence, so
-     * exact box coordinates are not critical.
+     * Note: In CAM display mode, box coordinates are used to render
+     * bounding boxes on screen, so accurate mapping matters.
      */
     float scale_w = (float)model_w / (float)width;
     float scale_h = (float)model_h / (float)height;
@@ -593,11 +593,21 @@ static void *inference_thread_func(void *arg) {
         float frame_ms = (float)(frame_t1 - frame_t0) / 1000.0f;
 
         /* In CAM mode, skip adaptive sleep for real-time feedback.
-         * Cache the check (~1s refresh) to avoid per-frame syscall. */
+         * Cache the check (~1s refresh) to avoid per-frame syscall.
+         * Uses fopen+content check (matching camera_display.c) so
+         * future display modes beyond "cam"/"hud" are handled correctly. */
         static int cached_cam_mode = 0;
         static int cam_check_ctr = 0;
         if (++cam_check_ctr >= 15) {
-            cached_cam_mode = (access(HUD_IPC_DISPLAY_MODE, F_OK) == 0);
+            FILE *dm_fp = fopen(HUD_IPC_DISPLAY_MODE, "r");
+            if (dm_fp) {
+                char dm_buf[8] = {0};
+                fread(dm_buf, 1, sizeof(dm_buf) - 1, dm_fp);
+                fclose(dm_fp);
+                cached_cam_mode = (dm_buf[0] == 'c');
+            } else {
+                cached_cam_mode = 0;
+            }
             cam_check_ctr = 0;
         }
         if (cached_cam_mode) {

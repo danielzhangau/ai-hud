@@ -375,13 +375,14 @@ static inline int clamp8(int v) {
 
 /*
  * NV12 480x480 -> XRGB fullscreen (480x480) for CAM display mode.
- * Reserves a top-left corner for the Python-rendered settings gear icon.
+ * Reserves a top-left corner for the Python-rendered menu icon.
  * BT.601 full-range conversion, integer fixed-point arithmetic.
  */
 
-/* Top-left pixel region reserved for Python gear icon overlay.
- * Gear center (18,18) with 8px teeth radius + 3px tooth size = ~29px max.
- * Use 40px for padding.  Python draws gear here; C never overwrites it. */
+/* Top-left pixel region reserved for Python menu icon overlay.
+ * Python `_draw_menu_icon()` draws a hamburger menu here (three horizontal
+ * lines within ~30px).  Use 40px for padding.  C never overwrites this
+ * region; Python `flush_rect(0, 0, 40, 40)` manages it independently. */
 #define GEAR_RESERVE_SIZE   40
 
 static void nv12_480_to_fullscreen_xrgb(const uint8_t *nv12, uint8_t *fb) {
@@ -570,29 +571,17 @@ static int vo_init(void) {
     }
 
     /* ---- VO layer (GRAPHIC mode + RGA splice, matching official demo) ---- */
+    /* Note: vo_init() is only called when g_pip_mode == 0 (see main()),
+     * so this is always the full-screen path. */
     VO_VIDEO_LAYER_ATTR_S layer_attr;
     memset(&layer_attr, 0, sizeof(layer_attr));
 
-    if (g_pip_mode) {
-        /* PiP: camera scaled to small window at bottom-right corner.
-         * stDispRect  = physical position/size on screen (VO hardware scales).
-         * stImageSize = virtual canvas matching VPSS output (480x480).
-         * VO hardware scales the 480x480 canvas down to 120x120 on screen. */
-        layer_attr.stDispRect.s32X      = PIP_X;
-        layer_attr.stDispRect.s32Y      = PIP_Y;
-        layer_attr.stDispRect.u32Width  = PIP_SIZE;
-        layer_attr.stDispRect.u32Height = PIP_SIZE;
-        layer_attr.stImageSize.u32Width  = DISPLAY_WIDTH;
-        layer_attr.stImageSize.u32Height = DISPLAY_HEIGHT;
-    } else {
-        /* Full-screen camera preview */
-        layer_attr.stDispRect.s32X      = 0;
-        layer_attr.stDispRect.s32Y      = 0;
-        layer_attr.stDispRect.u32Width  = VO_SCREEN_WIDTH;
-        layer_attr.stDispRect.u32Height = VO_SCREEN_HEIGHT;
-        layer_attr.stImageSize.u32Width  = VO_SCREEN_WIDTH;
-        layer_attr.stImageSize.u32Height = VO_SCREEN_HEIGHT;
-    }
+    layer_attr.stDispRect.s32X      = 0;
+    layer_attr.stDispRect.s32Y      = 0;
+    layer_attr.stDispRect.u32Width  = VO_SCREEN_WIDTH;
+    layer_attr.stDispRect.u32Height = VO_SCREEN_HEIGHT;
+    layer_attr.stImageSize.u32Width  = VO_SCREEN_WIDTH;
+    layer_attr.stImageSize.u32Height = VO_SCREEN_HEIGHT;
     layer_attr.enPixFormat           = RK_FMT_RGB888;
     layer_attr.enCompressMode        = COMPRESS_AFBC_16x16;
     layer_attr.u32DispFrmRt          = TARGET_FPS;
@@ -615,8 +604,7 @@ static int vo_init(void) {
     /* ---- VO channel (fills the layer area) ---- */
     VO_CHN_ATTR_S chn_attr;
     memset(&chn_attr, 0, sizeof(chn_attr));
-    /* Channel rect fills the layer's virtual canvas (stImageSize).
-     * In both modes stImageSize = 480x480, so channel is always full-canvas. */
+    /* Channel rect fills the layer's virtual canvas (stImageSize = 480x480). */
     chn_attr.stRect.s32X      = 0;
     chn_attr.stRect.s32Y      = 0;
     chn_attr.stRect.u32Width  = DISPLAY_WIDTH;
@@ -637,16 +625,9 @@ static int vo_init(void) {
         return ret;
     }
 
-    if (g_pip_mode) {
-        printf("[INFO] VO initialized (PiP): dev=%d, layer=%d, chn=%d, "
-               "%dx%d at (%d,%d) @ %dfps\n",
-               VO_DEV_ID, VO_LAYER_ID, VO_CHN_ID,
-               PIP_SIZE, PIP_SIZE, PIP_X, PIP_Y, TARGET_FPS);
-    } else {
-        printf("[INFO] VO initialized: dev=%d, layer=%d, chn=%d, %dx%d @ %dfps\n",
-               VO_DEV_ID, VO_LAYER_ID, VO_CHN_ID,
-               VO_SCREEN_WIDTH, VO_SCREEN_HEIGHT, TARGET_FPS);
-    }
+    printf("[INFO] VO initialized: dev=%d, layer=%d, chn=%d, %dx%d @ %dfps\n",
+           VO_DEV_ID, VO_LAYER_ID, VO_CHN_ID,
+           VO_SCREEN_WIDTH, VO_SCREEN_HEIGHT, TARGET_FPS);
     return 0;
 }
 
