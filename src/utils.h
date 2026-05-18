@@ -9,6 +9,7 @@
 #ifndef UTILS_H
 #define UTILS_H
 
+#include <stddef.h>   /* NULL */
 #include <stdint.h>
 #include <sys/time.h>
 

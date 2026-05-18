@@ -161,15 +161,6 @@ static inline void compute_areas(float x1_min, float y1_min, float x1_max, float
     *a2_out = (x2_max - x2_min) * (y2_max - y2_min);
 }
 
-static float calculate_overlap(float x1_min, float y1_min, float x1_max, float y1_max,
-                                float x2_min, float y2_min, float x2_max, float y2_max) {
-    float inter, a1, a2;
-    compute_areas(x1_min, y1_min, x1_max, y1_max,
-                  x2_min, y2_min, x2_max, y2_max, &inter, &a1, &a2);
-    float u = a1 + a2 - inter;
-    return (u > 0.0f) ? inter / u : 0.0f;
-}
-
 /* --------------------------------------------------------------------------
  * Internal accumulation buffer
  * -------------------------------------------------------------------------- */
