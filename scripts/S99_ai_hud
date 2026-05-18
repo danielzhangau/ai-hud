@@ -40,6 +40,12 @@ LOG_MAX_SIZE=1048576
 # Respawn delay (seconds) after crash
 RESPAWN_DELAY=3
 
+# Crash-loop backoff: if a process crashes >=N times within W seconds, slow
+# respawn to BACKOFF_DELAY to avoid CPU/log thrashing. Reset on stable run.
+CRASH_BURST_THRESHOLD=5
+CRASH_BURST_WINDOW=30
+BACKOFF_DELAY=60
+
 # System watchdog: reboot if Python heartbeat stale for this long
 HEARTBEAT_FILE="/tmp/ai_hud_heartbeat"
 HEARTBEAT_TIMEOUT=90    # seconds before considering app hung
@@ -77,6 +83,15 @@ clear_pyc() {
     find /root -name '__pycache__' -type d -exec rm -rf {} + 2>/dev/null
 }
 
+cleanup_ipc_files() {
+    # Unified IPC cleanup used by both start() and stop().
+    # Keeping these in sync prevents stale display_mode/npu_enable from a
+    # previous (possibly crashed) run leaking into a fresh boot.
+    rm -f /tmp/ai_hud_ready /tmp/ai_hud_detect /tmp/ai_hud_speed \
+          /tmp/ai_hud_npu_enable /tmp/ai_hud_gps /tmp/ai_hud_display_mode \
+          /tmp/ai_hud_pip_hide /tmp/ai_hud_heartbeat /tmp/ai_hud_isp_config
+}
+
 kill_display_blockers() {
     # Stop processes that may occupy the camera or display
     for proc in rkipc simple_vi_get_frame_send_vo_rv1106; do
@@ -98,8 +113,16 @@ show_splash() {
 }
 
 clear_screen() {
+    # Wrap dd in a background-kill sentinel so stop() returns within ~3s
+    # even if the framebuffer driver is wedged (e.g., RKMPI cleanup race).
+    # /dev/fb0 is 480x480*4 = 921600 bytes; count=900 (KB) covers it exactly.
     if [ -e "$FB_DEV" ]; then
-        dd if=/dev/zero of="$FB_DEV" bs=1k 2>/dev/null
+        dd if=/dev/zero of="$FB_DEV" bs=1k count=900 2>/dev/null &
+        _dd_pid=$!
+        ( sleep 3; kill -KILL "$_dd_pid" 2>/dev/null ) &
+        _killer_pid=$!
+        wait "$_dd_pid" 2>/dev/null
+        kill "$_killer_pid" 2>/dev/null
     fi
 }
 
@@ -123,8 +146,35 @@ safe_kill() {
     return 1
 }
 
+# Compute respawn delay after a crash, applying exponential backoff if the
+# process is crashing repeatedly within CRASH_BURST_WINDOW. The caller passes
+# in the previous crash counter and timestamp by reference (via stdout) so the
+# function stays stateless and shell-portable.
+#
+# Usage: read NEW_COUNT NEW_TS NEW_DELAY <<< "$(crash_backoff "$name" "$last_count" "$last_ts")"
+crash_backoff() {
+    _name="$1"
+    _last_count="$2"
+    _last_ts="$3"
+    _now=$(date +%s)
+    if [ "$((_now - _last_ts))" -lt "$CRASH_BURST_WINDOW" ]; then
+        _new_count=$((_last_count + 1))
+    else
+        _new_count=1
+    fi
+    if [ "$_new_count" -ge "$CRASH_BURST_THRESHOLD" ]; then
+        _delay="$BACKOFF_DELAY"
+        log "$_name crashed $_new_count times rapidly, backing off to ${_delay}s"
+    else
+        _delay="$RESPAWN_DELAY"
+    fi
+    echo "$_new_count $_now $_delay"
+}
+
 # Watchdog loop: restart process on crash
 watchdog_c() {
+    _crash_count=0
+    _last_crash_ts=0
     while true; do
         _model=""
         if [ -f "$AI_HUD_MODEL" ]; then
@@ -152,13 +202,17 @@ watchdog_c() {
             continue
         fi
         _exit=$?
-        log "ai-hud exited with code $_exit, restarting in ${RESPAWN_DELAY}s"
+        set -- $(crash_backoff "ai-hud" "$_crash_count" "$_last_crash_ts")
+        _crash_count="$1"; _last_crash_ts="$2"; _delay="$3"
+        log "ai-hud exited with code $_exit, restarting in ${_delay}s"
         rotate_log "$LOGFILE_C"
-        sleep "$RESPAWN_DELAY"
+        sleep "$_delay"
     done
 }
 
 watchdog_py() {
+    _crash_count=0
+    _last_crash_ts=0
     while true; do
         if [ -f "$HUD_PY" ]; then
             python3 -u "$HUD_PY" $HUD_PY_ARGS >> "$LOGFILE" 2>&1 &
@@ -172,9 +226,11 @@ watchdog_py() {
             continue
         fi
         _exit=$?
-        log "hud_live.py exited with code $_exit, restarting in ${RESPAWN_DELAY}s"
+        set -- $(crash_backoff "hud_live.py" "$_crash_count" "$_last_crash_ts")
+        _crash_count="$1"; _last_crash_ts="$2"; _delay="$3"
+        log "hud_live.py exited with code $_exit, restarting in ${_delay}s"
         rotate_log "$LOGFILE"
-        sleep "$RESPAWN_DELAY"
+        sleep "$_delay"
     done
 }
 
@@ -209,16 +265,25 @@ system_watchdog() {
 start() {
     log "===== START ====="
 
-    # Kill any leftover instances from previous boot/crash
+    # 1. Kill leftover watchdogs FIRST so they can't respawn children during
+    #    the cleanup below. The watchdog subshells are forked via `&` and
+    #    inherit the parent's cmdline ("/bin/sh /etc/init.d/S99_ai_hud start"),
+    #    so safe_kill must match against "S99_ai_hud" (NOT "watchdog").
+    safe_kill "$WATCHDOG_SYS_PID" "S99_ai_hud" TERM
+    safe_kill "$WATCHDOG_C_PID" "S99_ai_hud" TERM
+    safe_kill "$WATCHDOG_PY_PID" "S99_ai_hud" TERM
+    sleep 1
+    safe_kill "$WATCHDOG_SYS_PID" "S99_ai_hud" KILL
+    safe_kill "$WATCHDOG_C_PID" "S99_ai_hud" KILL
+    safe_kill "$WATCHDOG_PY_PID" "S99_ai_hud" KILL
+
+    # 2. Then kill leftover worker processes (no longer auto-respawned).
     pkill -f "ai-hud" 2>/dev/null
     pkill -f "hud_live.py" 2>/dev/null
-    # Kill leftover watchdog loops
-    safe_kill "$WATCHDOG_C_PID" "watchdog" KILL
-    safe_kill "$WATCHDOG_PY_PID" "watchdog" KILL
-    safe_kill "$WATCHDOG_SYS_PID" "S99_ai_hud" KILL
+
     rm -f "$AI_HUD_PIDFILE" "$HUD_PY_PIDFILE"
     rm -f "$WATCHDOG_C_PID" "$WATCHDOG_PY_PID" "$WATCHDOG_SYS_PID"
-    rm -f /tmp/ai_hud_ready /tmp/ai_hud_detect /tmp/ai_hud_speed /tmp/ai_hud_heartbeat /tmp/ai_hud_isp_config
+    cleanup_ipc_files
     sleep 1
 
     # Rotate logs before starting
@@ -278,10 +343,7 @@ stop() {
 
     rm -f "$AI_HUD_PIDFILE" "$HUD_PY_PIDFILE"
 
-    # Clean up IPC files
-    rm -f /tmp/ai_hud_ready /tmp/ai_hud_detect /tmp/ai_hud_speed
-    rm -f /tmp/ai_hud_npu_enable /tmp/ai_hud_gps /tmp/ai_hud_display_mode
-    rm -f /tmp/ai_hud_pip_hide /tmp/ai_hud_heartbeat /tmp/ai_hud_isp_config
+    cleanup_ipc_files
 
     # Clear the framebuffer to black
     clear_screen
