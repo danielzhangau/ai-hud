@@ -19,6 +19,19 @@
 #include <stdio.h>
 
 /* -----------------------------------------------------------------------
+ * Result freshness window
+ *
+ * Display refresh (~25 FPS = 40ms) outpaces NPU inference (~4 FPS = 250ms)
+ * in CAM mode, so the same detection result is consumed by ~6 display
+ * frames. After STALE_THRESHOLD_MS without a fresh result we stop drawing
+ * boxes -- they no longer match what the user sees on screen.
+ *
+ * 350ms gives us one full inference cycle of grace + headroom for jitter.
+ * Tighter than this and we flicker; looser and stale boxes persist.
+ * ----------------------------------------------------------------------- */
+#define STALE_THRESHOLD_MS  350
+
+/* -----------------------------------------------------------------------
  * Coordinate mapping: NPU (640x640) -> Display (480x480)
  *
  * Both paths apply the same non-uniform stretch (no center-crop):
@@ -233,9 +246,9 @@ static void draw_string(uint8_t *fb, int fb_w, int fb_h,
  * Display confidence threshold
  *
  * Detections below this threshold are hidden in CAM overlay to reduce
- * visual noise. The inference-level BOX_THRESH (0.40) in postprocess.h
- * is preserved so HUD IPC still receives lower-confidence results for
- * GPS fusion logic in hud_live.py.
+ * visual noise. The inference-level BOX_THRESH (0.65) in postprocess.h
+ * is preserved so HUD IPC still receives detections at the F1-optimal
+ * operating point for GPS fusion logic in hud_live.py.
  * ----------------------------------------------------------------------- */
 
 #define DISPLAY_CONF_THRESH  0.50f
@@ -262,6 +275,18 @@ void overlay_draw_detections(uint8_t *fb, int fb_w, int fb_h,
                              const detect_result_group_t *dets) {
     if (!fb || !dets || dets->count <= 0)
         return;
+
+    /*
+     * Skip if the result is older than STALE_THRESHOLD_MS. Prevents box
+     * "ghosting" -- the camera frame has moved on but inference hasn't
+     * produced a new result yet, so the old box no longer aligns with
+     * what's visible. Better to drop boxes briefly than mislead the user.
+     */
+    if (dets->last_update_ms > 0) {
+        int64_t now_ms = time_us() / 1000;
+        if (now_ms - dets->last_update_ms > STALE_THRESHOLD_MS)
+            return;
+    }
 
     int count = dets->count;
     if (count > OBJ_NUMB_MAX_SIZE)

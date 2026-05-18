@@ -35,7 +35,17 @@ extern "C" {
 
 #define NMS_THRESH          0.45f   /* IoU threshold for NMS             */
 #define NMS_CONTAINMENT     0.60f   /* Containment threshold for nested boxes */
-#define BOX_THRESH          0.40f   /* Object confidence threshold (conservative) */
+/*
+ * BOX_THRESH -- combined obj*cls confidence threshold.
+ *
+ * Tuned to training F1-optimal operating point:
+ *   v2 universal model: best F1=0.91 @ conf=0.664 (see training/runs/.../README.md)
+ *   Values below 0.65 sit in the "background-confused" regime where the
+ *   network produces frequent low-confidence false positives because YOLOv5
+ *   has no explicit background class -- every obj-positive grid cell must be
+ *   assigned to one of OBJ_CLASS_NUM speed limits.
+ */
+#define BOX_THRESH          0.65f
 #define PROP_BOX_SIZE       (5 + OBJ_CLASS_NUM)  /* 4 coords + 1 obj + classes */
 
 /*
@@ -81,6 +91,14 @@ typedef struct _detect_result_t {
 typedef struct _detect_result_group_t {
     int              id;
     int              count;
+    /*
+     * last_update_ms -- monotonic millisecond timestamp of the inference
+     * that produced this result. Set by rknn_detect.c after post_process.
+     * Consumers (overlay_draw, IPC) treat results older than ~350ms as
+     * stale to avoid showing boxes that no longer match the live frame
+     * (NPU runs at ~4 FPS, display at ~25 FPS in CAM mode).
+     */
+    int64_t          last_update_ms;
     detect_result_t  results[OBJ_NUMB_MAX_SIZE];
 } detect_result_group_t;
 

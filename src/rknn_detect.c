@@ -513,6 +513,21 @@ static void *inference_thread_func(void *arg) {
         int64_t frame_t0 = time_us();
 
         if (frame_vaddr) {
+            /*
+             * Defensive stride check: nv12_to_rgb assumes y_stride == u32Width.
+             * For VI CHN1 selfpath at 640x640, alignment makes this true, but
+             * log a warning if VPSS ever feeds an unexpected geometry so we
+             * catch the bug at first occurrence rather than silently reading
+             * past the end of each row.
+             */
+            static int stride_warned = 0;
+            if (!stride_warned &&
+                (vf->u32Width == 0 || (vf->u32Width & 0x0F) != 0)) {
+                printf("[WARN] Frame width %u not 16-aligned, NV12 stride "
+                       "assumption may be invalid\n", vf->u32Width);
+                stride_warned = 1;
+            }
+
             /* Run inference */
             memset(&local_result, 0, sizeof(local_result));
             ret = rknn_detect_run(ctx,
@@ -521,24 +536,42 @@ static void *inference_thread_func(void *arg) {
                                   &local_result);
 
             if (ret == 0) {
+                /*
+                 * Stamp the result with the wall-clock time of inference
+                 * completion. Consumers (overlay_draw, fusion) use this
+                 * to discard stale results that no longer match the live
+                 * frame -- critical in CAM mode where display refresh
+                 * (~25 FPS) outpaces inference (~4 FPS).
+                 */
+                local_result.last_update_ms = time_us() / 1000;
+
                 /* Update shared result (thread-safe) */
                 pthread_mutex_lock(&ctx->result_mutex);
                 memcpy(&ctx->det_result, &local_result, sizeof(local_result));
                 pthread_mutex_unlock(&ctx->result_mutex);
 
-                /* Write detection results to IPC file for HUD display */
-                if (local_result.count > 0) {
-                    int cls_ids[OBJ_NUMB_MAX_SIZE];
-                    float confs[OBJ_NUMB_MAX_SIZE];
-                    for (int i = 0; i < local_result.count; i++) {
-                        cls_ids[i] = local_result.results[i].class_id;
-                        confs[i] = local_result.results[i].prop;
-                    }
-                    hud_ipc_update_from_detections(
-                        local_result.count, cls_ids, confs);
+                /*
+                 * Write IPC EVERY frame -- including count==0 -- so the
+                 * Python HUD observes the "no detection" transition.
+                 * Previously this gate caused stale detections to persist
+                 * in /tmp/ai_hud_detect indefinitely after the sign left
+                 * the frame, since the file mtime never changed.
+                 *
+                 * hud_ipc_update_from_detections() handles count==0
+                 * correctly: it writes speed_limit=0, camera=0, conf=0.0.
+                 */
+                int cls_ids[OBJ_NUMB_MAX_SIZE];
+                float confs[OBJ_NUMB_MAX_SIZE];
+                for (int i = 0; i < local_result.count; i++) {
+                    cls_ids[i] = local_result.results[i].class_id;
+                    confs[i] = local_result.results[i].prop;
+                }
+                hud_ipc_update_from_detections(
+                    local_result.count, cls_ids, confs);
 
 #ifndef NDEBUG
-                    /* Debug: log raw box dimensions (NPU 640x640 space) */
+                /* Debug: log raw box dimensions (NPU 640x640 space) */
+                if (local_result.count > 0) {
                     static int box_log_count = 0;
                     if (box_log_count < 20) {
                         for (int i = 0; i < local_result.count; i++) {
@@ -553,8 +586,8 @@ static void *inference_thread_func(void *arg) {
                         }
                         box_log_count++;
                     }
-#endif
                 }
+#endif
 
                 /* Data capture: save frame for model iteration */
                 float cap_speed = hud_ipc_read_speed();

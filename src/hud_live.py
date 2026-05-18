@@ -322,15 +322,31 @@ class DetectionState:
 
     def __init__(self, filepath=NPU_DETECT_FILE):
         self.filepath = filepath
-        self.speed_limit = region_mgr.default_limit
-        self.camera_detected = False
-        self.confidence = 0.0
+        # Two-tier state separation:
+        #   raw_npu_*       -- latest NPU output from IPC (per-frame ground truth)
+        #   speed_limit/... -- fused output for display (consumes raw + DB)
+        # Conflating these caused a feedback loop: fusion was fed its own
+        # previous output as "new NPU input", letting a single real detection
+        # accumulate enough votes via stale repeats to trigger an override.
+        self.raw_npu_speed_limit = 0
+        self.raw_npu_confidence = 0.0
+        self.raw_npu_camera = False
+
+        self.speed_limit = region_mgr.default_limit  # post-fusion display value
+        self.camera_detected = False                  # post-fusion display value
+        self.confidence = 0.0                          # mirrors raw_npu_confidence
         self.last_poll = 0
         self._last_mtime = 0
         self.npu_enabled = True  # user toggle for live detection
 
     def poll(self):
-        """Read detection file if changed. Called from main loop."""
+        """Read detection file if changed. Called from main loop.
+
+        Updates only the raw_npu_* fields; the fused display fields are
+        owned by SpeedFusion and updated by the caller. After the P1 fix
+        the C side writes IPC every inference cycle (including count==0),
+        so raw_npu_speed_limit reliably reflects "no detection" as 0.
+        """
         if not self.npu_enabled:
             return  # NPU disabled, skip polling
         now = time.time()
@@ -358,17 +374,22 @@ class DetectionState:
                                 region_mgr.region, {}
                             ).get("valid_speeds")
                             if detected == 0 or valid is None or detected in valid:
-                                self.speed_limit = detected
-                            # else: ignore (e.g., 20km/h detected in AU)
+                                self.raw_npu_speed_limit = detected
+                            else:
+                                # Out-of-region detection: treat as no detection.
+                                self.raw_npu_speed_limit = 0
                         except ValueError:
                             pass
                     elif key == "camera":
-                        self.camera_detected = val.strip() == "1"
+                        self.raw_npu_camera = val.strip() == "1"
                     elif key == "confidence":
                         try:
-                            self.confidence = float(val)
+                            self.raw_npu_confidence = float(val)
                         except ValueError:
                             pass
+
+            # Mirror raw confidence to legacy field for any external reader.
+            self.confidence = self.raw_npu_confidence
         except (OSError, IOError):
             pass  # file doesn't exist yet -- NPU not running
 
@@ -378,6 +399,9 @@ class DetectionState:
         write_npu_enable_ipc(self.npu_enabled)
         if not self.npu_enabled:
             # Clear stale NPU results when disabled
+            self.raw_npu_speed_limit = 0
+            self.raw_npu_confidence = 0.0
+            self.raw_npu_camera = False
             self.speed_limit = region_mgr.default_limit
             self.camera_detected = False
             self.confidence = 0.0
@@ -721,16 +745,20 @@ def main():
                     # Fuse speed limit via state machine:
                     # DB is baseline, NPU can only lower (construction),
                     # requires 3 consecutive high-confidence detections.
+                    #
+                    # IMPORTANT: pass raw_npu_speed_limit (not detect.speed_limit)
+                    # so fusion always sees the per-frame NPU truth, never its
+                    # own previous output. Previously these were conflated.
                     detect.speed_limit = speed_fusion.update(
                         db_limit,
-                        detect.speed_limit,
-                        detect.confidence)
+                        detect.raw_npu_speed_limit,
+                        detect.raw_npu_confidence)
 
                     # Fuse camera warning: DB proximity OR NPU detection
                     if fuse_camera_warning_fn is not None:
                         show_cam, cam_dist, cam_src = fuse_camera_warning_fn(
                             db_cameras,
-                            detect.camera_detected)
+                            detect.raw_npu_camera)
                         detect.camera_detected = show_cam
                 elif speed_fusion and not gps.valid:
                     # Lost GPS fix -- reset fusion state
