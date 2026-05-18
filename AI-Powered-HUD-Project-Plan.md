@@ -40,7 +40,7 @@ Build a compact, low-power AI-powered Head-Up Display (HUD) for vehicles that pr
 |---------|----------|--------|-------------|
 | Camera feed | P0 | Done | Real-time forward-facing video via MIPI CSI (PiP 120x120) |
 | Display output | P0 | Done | HUD render to 480x480 DPI LCD via framebuffer |
-| Speed limit detection | P0 | Done | AU speed sign recognition via NPU (YOLOv5n) |
+| Speed limit detection | P0 | Done | AU + CN universal speed sign recognition via NPU (YOLOv5n, 11-class) |
 | GPS speed overlay | P0 | Done | Speed, heading, satellite count on HUD |
 | Speed limit database | P0 | Done | Offline GPS-based speed lookup (OSM data, 170K+ zones) |
 | Speed camera alerts | P1 | Done | GPS proximity + NPU detection (1,300+ cameras) |
@@ -573,14 +573,14 @@ Main Render Thread:                 v
 | Model | Task | Input Size | FPS (RV1106) | Status |
 |-------|------|-----------|-------------|--------|
 | YOLOv5n (COCO 80-class) | General detection | 640x640 | ~12 FPS | Test done |
-| YOLOv5n (AU 9-class) | AU speed sign + camera | 320x320 | ~15-20 FPS | **Production** |
+| YOLOv5n (universal 11-class) | AU + CN speed sign | 640x640 | ~4 FPS (adaptive) | **Production** |
 
-**Production model**: Custom YOLOv5n trained on Australian speed sign dataset (9 classes: speed_10/20/30/40/50/60/70/80 + speed_camera). INT8 quantized for RKNPU.
+**Production model**: Custom YOLOv5n trained on universal AU + CN speed sign dataset (11 classes: 20/30/40/50/60/70/80/90/100/110/120 km/h). Speed camera is detected via GPS database, not vision. INT8 quantized for RKNPU. Training metrics: mAP@0.5=0.943, best F1=0.91 @ conf=0.664 (matches BOX_THRESH=0.65 in postprocess.h).
 
 **Performance** (measured on device):
-- NPU inference: ~61ms (hardware fixed)
-- Postprocess: ~20ms (optimized from 61ms via static buffers + INT8 class search)
-- PiP render: ~1ms (120x120 NV12->XRGB point-sample)
+- NPU inference: ~250ms @ 640x640 (~4 FPS, throttled by adaptive rate based on GPS speed)
+- Postprocess: ~5ms (static buffers + INT8 quantized-space pre-filter + monotonic class search)
+- PiP render: ~1ms (NV12 480x480 -> XRGB8888 full-screen via mmap /dev/fb0)
 
 ### 8.2 Model Conversion Pipeline
 
@@ -882,15 +882,16 @@ ai-hud/
   tools/
     prepare_speed_db.py       # PC-side: download OSM data, generate binary DBs
   training/
-    prepare_dataset.py        # AU speed sign dataset preparation
-    train.sh                  # YOLOv5n training script
+    augment_crops.py          # Two-tier crop augmentation (scene + detail)
+    train_local.sh            # Mac M4 MPS training script
+    train_kaggle.ipynb        # Kaggle T4 training notebook
     train_colab.ipynb         # Google Colab training notebook
-    au_speed_signs.yaml       # Dataset config (9 classes)
+    runs/2026-05-17_v2_universal/  # Production model artifacts + metrics
     README.md                 # Training instructions
   scripts/
     S99_ai_hud                # init.d dual-process manager
   model/
-    au_speed_signs_rv1106.rknn  # Custom 9-class AU model (on device)
+    speed_signs_rv1106.rknn   # Universal 11-class AU+CN model (on device)
 ```
 
 ### 11.2 Build System (CMakeLists.txt skeleton)

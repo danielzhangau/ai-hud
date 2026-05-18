@@ -169,6 +169,9 @@ adb push src/config_manager.py /root/config_manager.py
 adb push src/speed_db.py /root/speed_db.py
 adb push src/gps_reader.py /root/gps_reader.py
 
+# Diagnostic tools (optional, for field debugging)
+adb push tools/measure_false_positives.py /root/measure_false_positives.py
+
 # RKNN model
 adb push models/speed_signs_rv1106.rknn /root/model/speed_signs_rv1106.rknn
 
