@@ -73,16 +73,36 @@ jobs:
           cp data/speed_cameras_cn.db firmware/data/ 2>/dev/null || true
           ls -la firmware/data/ || true
 
+      # Build the OTA update bundle that the macOS launcher pulls down
+      # to push code/db updates to devices already in the field. Skips
+      # the ai-hud C binary because the release pipeline doesn't compile
+      # it (see sdk-build vs app-build workflows -- the binary lives in
+      # the sdk-build firmware image and is updated by reflashing, not
+      # by an OTA bundle). Skips the .rknn model for the same reason it
+      # ships inside the rootfs.
+      - name: Build update bundle
+        run: |
+          VERSION="${{ github.ref_name }}"
+          VERSION="${VERSION#v}"
+          python3 tools/build_update_bundle.py \
+            --version "$VERSION" \
+            --skip-binary \
+            --skip-model
+          mv "dist/update-bundle-v${VERSION}.zip"    firmware/
+          mv "dist/update-bundle-v${VERSION}.sha256" firmware/
+          ls -la firmware/update-bundle*
+
       # Add SHA-256 checksums so users can verify downloads.
       - name: Compute checksums
         working-directory: firmware
         run: |
           # `find` (not glob) so the loop is silent when an extension has zero
           # matches; -print0 / -0 keeps spaces-in-names safe; redirect once.
-          # Includes *.db so the speed database checksums ship in the same
-          # SHA256SUMS file as the firmware images.
-          find . -maxdepth 2 -type f \( -name "*.img" -o -name "*.bin" -o -name "*.db" \) \
-            -print0 | xargs -0 -r sha256sum > SHA256SUMS
+          # Includes *.img / *.bin / *.db / *.zip so the firmware, speed
+          # databases, and update bundle all land in a single SHA256SUMS.
+          find . -maxdepth 2 -type f \
+              \( -name "*.img" -o -name "*.bin" -o -name "*.db" -o -name "*.zip" \) \
+              -print0 | xargs -0 -r sha256sum > SHA256SUMS
           echo "--- release bundle ---"
           ls -la
           ls -la data/ 2>/dev/null || true
@@ -104,6 +124,8 @@ jobs:
           files: |
             firmware/*.img
             firmware/data/*.db
+            firmware/update-bundle*.zip
+            firmware/update-bundle*.sha256
             firmware/SHA256SUMS
           # Fail the workflow if firmware/*.img isn't present so we never
           # ship an empty release. The .db glob is forgiving on its own --

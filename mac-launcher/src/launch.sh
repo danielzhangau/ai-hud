@@ -79,6 +79,16 @@ responding. Try power-cycling the device, then double-click this app again." cau
     exit 4
 fi
 
+# Best-effort OTA check. The updater compares /root/version.txt to the
+# latest GitHub Release tag; if outdated AND the user accepts the
+# prompt, it pulls the bundle and pushes the new code. Failures here
+# never block opening the dashboard -- the user sees whatever's
+# currently installed and the next launch can retry.
+UPDATER="$DIR/updater.py"
+if [ -f "$UPDATER" ] && command -v python3 >/dev/null 2>&1; then
+    python3 "$UPDATER" --adb "$ADB" --script-dir "$DIR" || true
+fi
+
 # Open the default browser. -g keeps the existing focused window from
 # losing focus (the launcher itself shouldn't steal it).
 open "${URL}"

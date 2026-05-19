@@ -54,9 +54,13 @@ echo "==> Assembling $APP_NAME.app..."
 mkdir -p "$APP_DIR/Contents/MacOS"
 mkdir -p "$APP_DIR/Contents/Resources"
 
-cp "$SRC_DIR/Info.plist" "$APP_DIR/Contents/Info.plist"
-cp "$SRC_DIR/launch.sh"  "$APP_DIR/Contents/MacOS/launch"
-cp "$ADB_BIN"            "$APP_DIR/Contents/MacOS/adb"
+cp "$SRC_DIR/Info.plist"   "$APP_DIR/Contents/Info.plist"
+cp "$SRC_DIR/launch.sh"    "$APP_DIR/Contents/MacOS/launch"
+cp "$ADB_BIN"              "$APP_DIR/Contents/MacOS/adb"
+# OTA updater + mirror config -- the launch script invokes these to
+# offer a one-click bundle install when the device is on an older tag.
+cp "$SRC_DIR/updater.py"   "$APP_DIR/Contents/MacOS/updater.py"
+cp "$SRC_DIR/mirrors.conf" "$APP_DIR/Contents/MacOS/mirrors.conf"
 # Platform tools needs a couple of co-located libs (e.g. libc++.dylib) on
 # some macOS versions -- they live next to adb in platform-tools/. Copy any
 # .dylib siblings just in case.

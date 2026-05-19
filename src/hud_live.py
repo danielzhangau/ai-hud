@@ -32,7 +32,27 @@ from ipc_writer import (
 # ---------------------------------------------------------------------------
 # App version
 # ---------------------------------------------------------------------------
-APP_VERSION = "1.0.0"
+# Default APP_VERSION when /root/version.txt isn't present (e.g. a fresh
+# device that hasn't been through an OTA update yet, or a dev workstation
+# running hud_live.py directly). _resolve_version() below overrides it
+# from /root/version.txt if available so the dashboard shows the bundle
+# version actually deployed, not whatever string we hardcoded last.
+APP_VERSION_FALLBACK = "0.0.0-dev"
+_VERSION_FILE = "/root/version.txt"
+
+
+def _resolve_version():
+    try:
+        with open(_VERSION_FILE) as f:
+            v = f.read().strip()
+            if v:
+                return v
+    except OSError:
+        pass
+    return APP_VERSION_FALLBACK
+
+
+APP_VERSION = _resolve_version()
 
 # ---------------------------------------------------------------------------
 # Region system -- GPS auto-detect for DB switching (UI always English)

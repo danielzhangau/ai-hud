@@ -40,3 +40,4 @@ enclosure/*.step
 
 # Empty dirs
 sysroot/
+dist/
