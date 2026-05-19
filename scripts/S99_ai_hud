@@ -259,6 +259,15 @@ system_watchdog() {
             reboot -f
             sleep 30  # should not reach here
         fi
+
+        # Piggyback periodic log rotation onto this 10s heartbeat loop.
+        # rotate_log() is a no-op until the file passes LOG_MAX_SIZE (1 MB),
+        # so this is cheap. Without this, a stable long-running device
+        # (HUD never crashes, never restarts) would never rotate -- worst
+        # case observed in long testing was ai_hud.log growing into the
+        # tens of MB and starting to eat into the rootfs free space.
+        rotate_log "$LOGFILE"
+        rotate_log "$LOGFILE_C"
     done
 }
 

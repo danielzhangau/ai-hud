@@ -118,8 +118,15 @@ jobs:
           tag_name: ${{ github.ref_name }}
           name: "AI-HUD ${{ github.ref_name }}"
           body_path: RELEASE_NOTES.md
-          # Prerelease for any 0.x or any tag containing a hyphen (e.g. v0.2.0-rc1).
-          # GitHub conveniently lets us pass a literal boolean expression here.
+          # Auto-detect prerelease. Two rules, matching SemVer 2.0 conventions:
+          #   1. Major version 0 (v0.x.y) is still "initial development" by
+          #      SemVer's definition -- public API may change at any time.
+          #   2. Any tag with a pre-release identifier (the `-foo` suffix in
+          #      SemVer, e.g. v1.0.0-rc1, v1.0.0-beta.2) is by definition a
+          #      pre-release. We use `contains('-')` because the SemVer spec
+          #      reserves `-` exclusively for the prerelease segment.
+          # Examples: v0.1.0 -> prerelease, v1.0.0-rc1 -> prerelease,
+          #           v1.0.0 -> full release, v2.3.4 -> full release.
           prerelease: ${{ startsWith(github.ref_name, 'v0.') || contains(github.ref_name, '-') }}
           files: |
             firmware/*.img
