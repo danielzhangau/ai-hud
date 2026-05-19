@@ -16,21 +16,35 @@
 
 set -euo pipefail
 
-SIZE_MB="${SIZE_MB:-32}"
+# 64 MB is the smallest size at which FAT32 (>=65525 clusters) works with
+# newfs_msdos's defaults, and we need ~20 MB for both launchers plus
+# headroom for the HOW-TO docs and a future Linux launcher.
+SIZE_MB="${SIZE_MB:-64}"
 OUT_DIR="${OUT_DIR:-dist}"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
-LAUNCHER_ZIP="$REPO_ROOT/mac-launcher/dist/AI-HUD Config.zip"
+
+MAC_ZIP="$REPO_ROOT/mac-launcher/dist/AI-HUD Config.zip"
+WIN_ZIP="$REPO_ROOT/windows-launcher/dist/AI-HUD Config (Windows).zip"
 HOW_TO_MD="$REPO_ROOT/mac-launcher/HOW-TO-OPEN.md"
 
 OUT_DIR_ABS="$(cd "$REPO_ROOT" && pwd)/$OUT_DIR"
 mkdir -p "$OUT_DIR_ABS"
 IMG="$OUT_DIR_ABS/launcher.img"
 
-if [ ! -f "$LAUNCHER_ZIP" ]; then
-    echo "ERROR: $LAUNCHER_ZIP not found. Build the launcher first:"
+if [ ! -f "$MAC_ZIP" ]; then
+    echo "ERROR: $MAC_ZIP not found. Build the macOS launcher first:"
     echo "  cd mac-launcher && ./build.sh"
     exit 1
+fi
+# Windows launcher is optional -- skip cleanly if not built yet, so
+# dev-machines without working Windows builds can still iterate.
+HAVE_WIN_LAUNCHER=0
+if [ -f "$WIN_ZIP" ]; then
+    HAVE_WIN_LAUNCHER=1
+else
+    echo "Note: $WIN_ZIP not found -- launcher disk will be mac-only."
+    echo "      Run windows-launcher/build.sh to add Windows support."
 fi
 
 # --- 1. Allocate raw image -------------------------------------------------
@@ -67,14 +81,13 @@ cleanup_attach() {
 }
 trap cleanup_attach EXIT
 
-echo "==> Formatting as FAT16 (volume label: AIHUD)"
-# FAT16 instead of FAT32: FAT32 needs >=65525 clusters which would force
-# the disk past ~256 MB. For a 32 MB launcher disk FAT16 is the right fit,
-# and both macOS and Windows mount it transparently with no extra clicks.
-# -F 16      = FAT16
-# -v AIHUD   = volume label (max 11 chars, uppercase)
-# -c 2       = cluster size (2 * 512B = 1 KiB), tight enough for ~10 MB files
-newfs_msdos -F 16 -v AIHUD -c 2 "$RAW_RDEV" >/dev/null
+echo "==> Formatting as FAT32 (volume label: AIHUD)"
+# FAT32 needs >=65525 clusters. With cluster size 2 (1 KiB) and 64 MB
+# we hit ~65k clusters but the reserved+FAT areas eat a few hundred,
+# putting us just under the threshold. Cluster size 1 (512 B) gives
+# 131072 raw clusters which clears 65525 with margin to spare. The
+# FAT32 table itself ends up at ~512 KiB, fine on a 64 MB volume.
+newfs_msdos -F 32 -v AIHUD -c 1 "$RAW_RDEV" >/dev/null
 
 cleanup_attach
 trap - EXIT
@@ -100,14 +113,29 @@ echo "==> Staging files onto $MOUNTPOINT"
 # emits a hidden xattr file that Windows / Linux users see in the file
 # listing -- visually noisy and confusing.
 export COPYFILE_DISABLE=1
-cp "$LAUNCHER_ZIP" "$MOUNTPOINT/AI-HUD Config.zip"
+
+# Per-platform subdirectories so the customer can tell at a glance
+# which folder applies to their OS. The macOS Config.zip is at the
+# top level too (this is the primary platform) so Mac users don't
+# have to dig.
+cp "$MAC_ZIP" "$MOUNTPOINT/AI-HUD Config.zip"
+mkdir -p "$MOUNTPOINT/For macOS"
+cp "$MAC_ZIP" "$MOUNTPOINT/For macOS/AI-HUD Config.zip"
+
+if [ "$HAVE_WIN_LAUNCHER" = "1" ]; then
+    mkdir -p "$MOUNTPOINT/For Windows"
+    cp "$WIN_ZIP" "$MOUNTPOINT/For Windows/AI-HUD Config (Windows).zip"
+fi
+
 if [ -f "$HOW_TO_MD" ]; then
     cp "$HOW_TO_MD" "$MOUNTPOINT/HOW-TO-OPEN.md"
 fi
 
-# Belt-and-braces: also delete the standard macOS sentinel directories
-# and any AppleDouble siblings the OS may have created anyway.
-find "$MOUNTPOINT" -maxdepth 1 -name '._*' -exec rm -f {} + 2>/dev/null || true
+# Belt-and-braces: delete macOS sentinel directories and AppleDouble
+# sidecars at every depth. Earlier we only swept the root; subfolders
+# like "For macOS/" still ended up with their own "._" siblings, which
+# Windows users would see as visible junk.
+find "$MOUNTPOINT" -name '._*' -exec rm -f {} + 2>/dev/null || true
 rm -rf "$MOUNTPOINT/.Spotlight-V100" "$MOUNTPOINT/.fseventsd" \
        "$MOUNTPOINT/.Trashes"            2>/dev/null || true
 
