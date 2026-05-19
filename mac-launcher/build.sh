@@ -23,6 +23,11 @@ CACHE_DIR="$SCRIPT_DIR/.cache"
 # Google CDN endpoint; sha256 verified after download.
 PLATFORM_TOOLS_URL="https://dl.google.com/android/repository/platform-tools-latest-darwin.zip"
 
+# Rockchip's upgrade_tool, distributed by Luckfox via their wiki. Universal
+# binary, ~900 KB, x86_64 + arm64. Needed by flash_firmware.py to write
+# update.img to the device when it's in MaskROM mode.
+UPGRADE_TOOL_URL="https://wiki.luckfox.com/assets/files/upgrade_tool_v2.44_for_mac-d34c9648a1c9bd0e965d598dc3183b67.zip"
+
 require() {
     command -v "$1" >/dev/null 2>&1 || { echo "ERROR: $1 missing"; exit 1; }
 }
@@ -49,18 +54,41 @@ fi
 [ -x "$ADB_BIN" ] || { echo "ERROR: adb not found after extract"; exit 2; }
 echo "    adb: $(file "$ADB_BIN" | sed 's|.*: ||')"
 
+# --- Fetch upgrade_tool ------------------------------------------------------
+UT_ZIP="$CACHE_DIR/upgrade_tool_mac.zip"
+UT_BIN="$CACHE_DIR/upgrade_tool_v2.44_for_mac/upgrade_tool"
+
+if [ ! -x "$UT_BIN" ]; then
+    echo "==> Downloading Luckfox upgrade_tool (firmware flasher)..."
+    curl -L --fail --progress-bar -o "$UT_ZIP" "$UPGRADE_TOOL_URL"
+    # The Luckfox zip contains a Chinese-encoded PDF that confuses unzip on
+    # macOS; -O CP936 fixes the filename or we just tolerate one warning and
+    # move on, since we only need the executable.
+    rm -rf "$CACHE_DIR/upgrade_tool_v2.44_for_mac"
+    unzip -q "$UT_ZIP" -d "$CACHE_DIR" 2>/dev/null || true
+    chmod +x "$UT_BIN" 2>/dev/null || true
+fi
+
+[ -x "$UT_BIN" ] || { echo "ERROR: upgrade_tool not found after extract"; exit 3; }
+echo "    upgrade_tool: $(file "$UT_BIN" | sed 's|.*: ||')"
+
 # --- Assemble .app bundle ----------------------------------------------------
 echo "==> Assembling $APP_NAME.app..."
 mkdir -p "$APP_DIR/Contents/MacOS"
 mkdir -p "$APP_DIR/Contents/Resources"
 
-cp "$SRC_DIR/Info.plist"   "$APP_DIR/Contents/Info.plist"
-cp "$SRC_DIR/launch.sh"    "$APP_DIR/Contents/MacOS/launch"
-cp "$ADB_BIN"              "$APP_DIR/Contents/MacOS/adb"
+cp "$SRC_DIR/Info.plist"          "$APP_DIR/Contents/Info.plist"
+cp "$SRC_DIR/launch.sh"           "$APP_DIR/Contents/MacOS/launch"
+cp "$ADB_BIN"                     "$APP_DIR/Contents/MacOS/adb"
+# Firmware flasher (MaskROM-mode device) -- distinct from the OTA path:
+# this one needs root + writes whole partitions. upgrade_tool is the
+# Luckfox-supplied Rockchip CLI; flash_firmware.py orchestrates it.
+cp "$UT_BIN"                      "$APP_DIR/Contents/MacOS/upgrade_tool"
+cp "$SRC_DIR/flash_firmware.py"   "$APP_DIR/Contents/MacOS/flash_firmware.py"
 # OTA updater + mirror config -- the launch script invokes these to
 # offer a one-click bundle install when the device is on an older tag.
-cp "$SRC_DIR/updater.py"   "$APP_DIR/Contents/MacOS/updater.py"
-cp "$SRC_DIR/mirrors.conf" "$APP_DIR/Contents/MacOS/mirrors.conf"
+cp "$SRC_DIR/updater.py"          "$APP_DIR/Contents/MacOS/updater.py"
+cp "$SRC_DIR/mirrors.conf"        "$APP_DIR/Contents/MacOS/mirrors.conf"
 # Platform tools needs a couple of co-located libs (e.g. libc++.dylib) on
 # some macOS versions -- they live next to adb in platform-tools/. Copy any
 # .dylib siblings just in case.
@@ -68,7 +96,9 @@ for dylib in "$CACHE_DIR/platform-tools/"*.dylib; do
     [ -f "$dylib" ] && cp "$dylib" "$APP_DIR/Contents/MacOS/"
 done
 
-chmod +x "$APP_DIR/Contents/MacOS/launch" "$APP_DIR/Contents/MacOS/adb"
+chmod +x "$APP_DIR/Contents/MacOS/launch" \
+         "$APP_DIR/Contents/MacOS/adb" \
+         "$APP_DIR/Contents/MacOS/upgrade_tool"
 
 # Validate the plist (catches typos that would prevent Finder from
 # recognizing the bundle).

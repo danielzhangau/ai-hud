@@ -36,6 +36,44 @@ if [ ! -x "$ADB" ]; then
     exit 1
 fi
 
+# Before doing anything else, sniff USB. Three valid states exist for the
+# device + this launcher to do something useful:
+#
+#   * ADB    -- device runs Linux normally; we want the OTA + dashboard
+#               path (the rest of this script).
+#   * MaskROM/Loader -- customer just held BOOT and replugged; they want a
+#               firmware flash. flash_firmware.py handles it.
+#   * none   -- nothing plugged in; show the "plug it in" dialog.
+#
+# We detect via ioreg (no admin prompt, fast) rather than running adb /
+# upgrade_tool blindly: each of those tools would otherwise pop its own
+# dialog box for a device that isn't there.
+RK_STATE=""
+if [ -f "$DIR/flash_firmware.py" ] && command -v python3 >/dev/null 2>&1; then
+    RK_STATE=$(python3 -c '
+import sys
+sys.path.insert(0, "'"$DIR"'")
+from flash_firmware import detect_rockchip_state
+print(detect_rockchip_state())
+' 2>/dev/null || echo "")
+fi
+
+case "$RK_STATE" in
+    maskrom|loader)
+        UPGRADE_TOOL="$DIR/upgrade_tool"
+        if [ ! -x "$UPGRADE_TOOL" ]; then
+            notify "Firmware-flash mode detected, but upgrade_tool is missing
+from the app bundle. Please reinstall AI-HUD Config." stop
+            exit 5
+        fi
+        python3 "$DIR/flash_firmware.py" --upgrade-tool "$UPGRADE_TOOL" || true
+        # After flashing the device reboots into normal Linux. We don't
+        # try to fall through to the OTA path here -- there's a ~30s
+        # boot window and the user will double-click again anyway.
+        exit 0
+        ;;
+esac
+
 # Start the local adb daemon explicitly. If a Homebrew / Android-Studio adb
 # is already running on a *different* protocol version it will refuse to talk
 # to our bundled one; in that case we kill the running server and retake it.
@@ -51,7 +89,10 @@ if ! "$ADB" devices | awk 'NR>1 && $2=="device" {found=1} END{exit !found}'; the
     notify "No AI-HUD device detected.
 
 Please plug the device in via USB, wait a few seconds for it to boot,
-then double-click this app again." caution
+then double-click this app again.
+
+If the device is in firmware-flash mode (BOOT button held while plugging
+in), make sure the cable is a data cable and not a power-only one." caution
     exit 2
 fi
 
