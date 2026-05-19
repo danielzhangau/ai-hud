@@ -25,26 +25,37 @@ DEFAULT_CONFIG_PATH = "/root/ai_hud.conf"
 # ---------------------------------------------------------------------------
 
 PARAM_DEFS = {
-    # Fusion parameters
+    # Fusion parameters: tuned algorithm constants, persisted to disk so
+    # they survive reboots and can be hand-edited via `adb shell vi
+    # /root/ai_hud.conf` in the rare case a fleet-wide tweak is needed.
+    # The web UI no longer surfaces these -- end users don't tune them.
     ("fusion", "npu_confidence_min"):   (float, 0.70, 0.10, 1.00),
     ("fusion", "npu_confidence_no_db"): (float, 0.60, 0.10, 1.00),
     ("fusion", "npu_vote_required"):    (int,   3,    1,    10),
     ("fusion", "npu_override_timeout"): (float, 15.0, 5.0,  120.0),
     ("fusion", "camera_alert_radius"):  (int,   800,  100,  2000),
 
-    # Settings
-    ("settings", "npu_enabled"):   (int,   1,    0,    1),
+    # Settings (only what isn't decidable automatically):
+    #   - region:         GPS-auto-detected, this is just the boot fallback
+    #                     before the first fix.
+    #   - mirror_display: tied to physical install orientation (windshield
+    #                     reflection vs. direct view); can't be auto-sensed.
+    #   - night_mode:     persisted *current* state (auto-managed by GPS
+    #                     sun-position at runtime; this is just the last
+    #                     known value so we don't flash the wrong tone for
+    #                     the few seconds before the first GPS fix).
+    #
+    # Removed (display_mode/npu_enabled/brightness): see commit history.
+    # display_mode is always "hud" in production builds; npu_enabled is
+    # always on; brightness was a phantom setting nothing actually read.
     ("settings", "region"):        (str,   "au", None, None),
-    ("settings", "brightness"):    (int,   100,  10,   100),
-    ("settings", "display_mode"):  (str,   "hud", None, None),
     ("settings", "mirror_display"): (int,   1,    0,    1),
     ("settings", "night_mode"):    (int,   0,    0,    1),
 }
 
 # Valid string choices (public: read via get_choices)
 _STR_CHOICES = {
-    ("settings", "region"):       ("au", "cn"),
-    ("settings", "display_mode"): ("hud", "cam"),
+    ("settings", "region"): ("au", "cn"),
 }
 
 

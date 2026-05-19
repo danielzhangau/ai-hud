@@ -9,6 +9,7 @@ Framebuffer: 480x480, 32bpp XRGB8888 (byte order: B, G, R, X)
 GPS: /dev/ttyS4, 9600 baud, NMEA protocol
 """
 
+import datetime
 import os
 import sys
 import time
@@ -232,6 +233,26 @@ def parse_gprmc(parts):
     result = {"type": "RMC", "valid": parts[2] == "A"}
     if not result["valid"]:
         return result
+    # UTC time (parts[1]=hhmmss.ss) and date (parts[9]=ddmmyy) are valid
+    # *only* when status is 'A'; the device has no RTC, so this is our
+    # sole source of truth for wall-clock time. Used by sun.py.
+    try:
+        t = parts[1]
+        if len(t) >= 6:
+            result["utc_hour"] = int(t[0:2])
+            result["utc_min"] = int(t[2:4])
+            result["utc_sec"] = int(float(t[4:]))
+    except (ValueError, IndexError):
+        pass
+    try:
+        d = parts[9]
+        if len(d) >= 6:
+            # NMEA date is ddmmyy with two-digit year -- assume 21st century.
+            result["utc_day"] = int(d[0:2])
+            result["utc_month"] = int(d[2:4])
+            result["utc_year"] = 2000 + int(d[4:6])
+    except (ValueError, IndexError):
+        pass
     # Latitude (parts[3]=ddmm.mmmm, parts[4]=N/S)
     lat = _nmea_to_decimal(parts[3], parts[4])
     if lat is not None:
@@ -281,6 +302,9 @@ class GPSState:
         self.satellites = 0
         self.fix_quality = 0
         self.last_update = 0
+        # UTC wall-clock from the most recent valid RMC; primary input to
+        # the day/night detector. None until we get a fix.
+        self.utc = None  # datetime.datetime in UTC
 
     def update(self, parsed):
         if parsed is None:
@@ -297,6 +321,17 @@ class GPSState:
                     self.speed_kmh = parsed["speed_kmh"]
                 if "heading" in parsed:
                     self.heading = parsed["heading"]
+                # UTC clock: stitch date + time if both present.
+                if all(k in parsed for k in
+                       ("utc_year", "utc_month", "utc_day",
+                        "utc_hour", "utc_min", "utc_sec")):
+                    try:
+                        self.utc = datetime.datetime(
+                            parsed["utc_year"], parsed["utc_month"], parsed["utc_day"],
+                            parsed["utc_hour"], parsed["utc_min"], parsed["utc_sec"],
+                            tzinfo=datetime.timezone.utc)
+                    except ValueError:
+                        pass  # invalid date components
                 self.last_update = time.time()
         elif t == "GGA":
             self.fix_quality = parsed.get("fix_quality", 0)
@@ -495,12 +530,11 @@ def main():
     gps = GPSState()
     detect = DetectionState()
 
-    # Read initial state from config (respects persisted settings)
+    # Production defaults -- not user-configurable. CAM mode + NPU-off
+    # only exist for developer debugging via direct edits.
     npu_initial = True
     display_mode = "hud"
     if config:
-        npu_initial = bool(config.get_int("settings", "npu_enabled"))
-        display_mode = config.get_str("settings", "display_mode")
         saved_region = config.get_str("settings", "region")
         if saved_region and saved_region != region_mgr.region:
             region_mgr.region = saved_region
@@ -513,12 +547,23 @@ def main():
     write_npu_enable_ipc(npu_initial)
     detect.npu_enabled = npu_initial
     write_display_mode_ipc(display_mode)
+    # Boot fallback for night_mode: use the last known auto-decision so the
+    # ISP isn't briefly miscalibrated before the first GPS fix. The
+    # auto-switcher rewrites this once GPS gives us a UTC time + position.
     night_mode_initial = config.get_int("settings", "night_mode") if config else 0
     write_isp_config_ipc(night_mode_initial)
-    print(f"Initial state: NPU={'ON' if npu_initial else 'OFF'}, "
-          f"display={display_mode}, mirror={'ON' if mirror_enabled else 'OFF'}, "
-          f"night={'ON' if night_mode_initial else 'OFF'}, "
-          f"region={region_mgr.region}")
+    print(f"Initial state: mirror={'ON' if mirror_enabled else 'OFF'}, "
+          f"night={'ON' if night_mode_initial else 'OFF'} (will auto-update), "
+          f"region={region_mgr.region} (will auto-update)")
+
+    # Day/night auto-switch state -- declared early so the dashboard's
+    # status snapshot (built inside the web server below) can read it
+    # even if the first GPS fix hasn't arrived yet.
+    auto_night_state = {
+        "current": bool(night_mode_initial),
+        "votes": 0,
+        "pending": None,
+    }
 
     nmea_buf = b""
     hud_state = HUDState()
@@ -563,6 +608,14 @@ def main():
 
     def _on_night_mode_change(enabled):
         write_isp_config_ipc(enabled)
+        # Persist the latest auto-decision so the next boot starts in the
+        # right mode instead of flashing the wrong ISP tone for ~5s.
+        if config:
+            try:
+                config.set("settings", "night_mode", 1 if enabled else 0)
+                config.save()
+            except Exception:
+                pass
         print(f"[ISP] Night mode: {'ON' if enabled else 'OFF'}")
 
     # --- Touch input + Settings UI (optional, graceful fallback) ---
@@ -596,18 +649,36 @@ def main():
     if config is not None:
         try:
             from web_config import WebConfigServer
+
+            def _build_status():
+                """Live status snapshot for the dashboard /api/state."""
+                age = int(time.time() - gps.last_update) if gps.last_update else None
+                # Cap reported age so a 17h uptime without GPS doesn't render
+                # as "62000s ago" -- looks like a bug.
+                if age is not None and age > 999:
+                    age = 999
+                last_det = None
+                npu_lim = getattr(detect, "raw_npu_speed_limit", 0)
+                if npu_lim:
+                    last_det = f"{npu_lim} km/h"
+                return {
+                    "gps_valid":  gps.valid,
+                    "gps_sats":   gps.satellites,
+                    "gps_age_s":  age,
+                    "speed_limit": detect.speed_limit,
+                    "speed_limit_source": getattr(detect, "speed_limit_source", None),
+                    "npu_running": detect.npu_enabled,
+                    "last_detection": last_det,
+                    "night_mode": bool(auto_night_state["current"]),
+                }
+
             web_server = WebConfigServer(
                 config=config,
                 region_mgr=region_mgr,
                 app_version=APP_VERSION,
-                npu_state_fn=lambda: detect.npu_enabled,
+                status_fn=_build_status,
                 callbacks={
-                    "on_npu_toggle":          _on_npu_toggle,
-                    "on_region_change":       _on_region_change,
-                    "on_fusion_reload":       _on_fusion_reload,
-                    "on_display_mode_change": _on_display_mode_change,
-                    "on_mirror_change":       _on_mirror_change,
-                    "on_night_mode_change":   _on_night_mode_change,
+                    "on_mirror_change": _on_mirror_change,
                 },
             )
             if not web_server.start_in_thread():
@@ -638,6 +709,45 @@ def main():
         pass
 
     settings_close_time = 0  # debounce: prevent accidental re-open
+
+    # --- Night-mode auto-switch state ---
+    # Drives day/night purely from GPS UTC time + (lat, lon); recomputed on
+    # every RMC fix (~1 Hz) but only writes the IPC when the decision
+    # actually changes, so the C-side ISP isn't woken up every second.
+    try:
+        from sun import is_night_now
+    except ImportError:
+        is_night_now = None
+        print("[NIGHT] sun module unavailable, day/night auto disabled")
+
+    # 3 consecutive same-direction GPS samples before committing -- guards
+    # against the brief window after a hot start when GPS UTC can be wrong.
+    AUTO_NIGHT_VOTE_THRESHOLD = 3
+
+    def update_night_auto():
+        if is_night_now is None or not gps.valid or gps.utc is None:
+            return
+        decision = is_night_now(gps.utc, gps.lat, gps.lon)
+        if decision is None:
+            return
+        if decision == auto_night_state["current"]:
+            auto_night_state["votes"] = 0
+            auto_night_state["pending"] = None
+            return
+        if auto_night_state["pending"] != decision:
+            auto_night_state["pending"] = decision
+            auto_night_state["votes"] = 1
+            return
+        auto_night_state["votes"] += 1
+        if auto_night_state["votes"] >= AUTO_NIGHT_VOTE_THRESHOLD:
+            auto_night_state["current"] = decision
+            auto_night_state["pending"] = None
+            auto_night_state["votes"] = 0
+            _on_night_mode_change(decision)
+            print(f"[NIGHT] auto-switched to "
+                  f"{'NIGHT' if decision else 'DAY'} "
+                  f"(GPS UTC={gps.utc.strftime('%H:%M')} "
+                  f"@ {gps.lat:.2f},{gps.lon:.2f})")
 
     try:
         while not _shutdown_requested:
@@ -740,6 +850,9 @@ def main():
             # Refresh display once per GPS cycle (on RMC)
             if rmc_seen:
                 detect.poll()  # check for NPU detection updates
+                # Day/night auto-switch piggybacks on RMC cadence (~1 Hz),
+                # vote-debounced so transient GPS noise can't flap the ISP.
+                update_night_auto()
 
                 # Write speed to IPC for C adaptive inference rate
                 spd_ipc = gps.speed_kmh if gps.valid else 0.0

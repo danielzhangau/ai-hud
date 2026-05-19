@@ -37,49 +37,34 @@ DEFAULT_PORT = 80
 # Schema introspection
 # ---------------------------------------------------------------------------
 
-# Human-friendly metadata for known keys. The web UI falls back to a sensible
-# default if a key is missing here, so this is purely cosmetic.
+# Human-friendly metadata for the small set of settings the dashboard
+# actually surfaces. Everything else is either auto-managed at runtime
+# (region, night_mode) or considered a developer-only knob hidden in
+# /root/ai_hud.conf (fusion.*). The web UI only exposes one toggle: the
+# install-time mirror flag.
 _KEY_META = {
-    ("settings", "display_mode"):
-        {"label": "Display", "desc": "HUD overlay or raw camera preview",
-         "display": {"hud": "HUD", "cam": "CAM"}, "order": 1},
     ("settings", "mirror_display"):
-        {"label": "Mirror", "desc": "Horizontal flip for windshield reflection",
-         "order": 2},
-    ("settings", "npu_enabled"):
-        {"label": "NPU Detection", "desc": "On-device speed-sign inference",
-         "order": 3},
-    ("settings", "night_mode"):
-        {"label": "Night Mode", "desc": "ISP tuning for low-light driving",
-         "order": 4},
-    ("settings", "region"):
-        {"label": "Region", "desc": "Country profile for speed limits / units",
-         "display": {"au": "AU", "cn": "CN"}, "order": 5},
-    ("settings", "brightness"):
-        {"label": "Brightness", "desc": "Framebuffer brightness (10-100)",
-         "order": 6},
-    ("fusion", "npu_confidence_min"):
-        {"label": "NPU Confidence (with DB)",
-         "desc": "Min trust level when GPS database has data", "order": 1},
-    ("fusion", "npu_confidence_no_db"):
-        {"label": "NPU Confidence (no DB)",
-         "desc": "Min trust level when GPS database is silent", "order": 2},
-    ("fusion", "npu_vote_required"):
-        {"label": "Confirm Count",
-         "desc": "Consecutive detections required to commit", "order": 3},
-    ("fusion", "npu_override_timeout"):
-        {"label": "NPU Timeout",
-         "desc": "Seconds until NPU override resets", "order": 4},
-    ("fusion", "camera_alert_radius"):
-        {"label": "Camera Alert Radius",
-         "desc": "Distance in meters to warn about cameras", "order": 5},
+        {"label": "Mirror display", "order": 1,
+         "desc": "Horizontally flip the HUD output. Turn on if the screen "
+                 "is being reflected off the windshield; off if mounted "
+                 "directly in front of the driver."},
+}
+
+# Which settings the dashboard is allowed to write. Fusion and other
+# parameters still live in PARAM_DEFS (for /root/ai_hud.conf hand-edits)
+# but are not user-facing -- POST /api/config rejects them outright.
+_USER_EDITABLE = {
+    ("settings", "mirror_display"),
 }
 
 
 def _build_schema():
-    """Build JSON-serializable schema for the frontend from PARAM_DEFS."""
+    """Schema for the few user-editable settings the dashboard exposes."""
     sections = {}
-    for (section, key), (typ, default, vmin, vmax) in PARAM_DEFS.items():
+    for (section, key) in _USER_EDITABLE:
+        if (section, key) not in PARAM_DEFS:
+            continue
+        typ, default, vmin, vmax = PARAM_DEFS[(section, key)]
         meta = _KEY_META.get((section, key), {})
         choices = list(get_choices(section, key))
         if typ is str:
@@ -92,10 +77,8 @@ def _build_schema():
             kind = "float"
         else:
             kind = "text"
-
         item = {
-            "key": key,
-            "kind": kind,
+            "key": key, "kind": kind,
             "label": meta.get("label", key),
             "desc": meta.get("desc", ""),
             "default": default,
@@ -103,14 +86,7 @@ def _build_schema():
         }
         if choices:
             item["choices"] = choices
-            item["display"] = meta.get("display", {c: c.upper() for c in choices})
-        if kind in ("int", "float"):
-            item["min"] = vmin
-            item["max"] = vmax
-            item["step"] = 1 if kind == "int" else 0.05
-
         sections.setdefault(section, []).append(item)
-
     for items in sections.values():
         items.sort(key=lambda x: (x["order"], x["key"]))
     return sections
@@ -130,33 +106,19 @@ _INDEX_HTML = """<!DOCTYPE html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>AI-HUD Config</title>
+<title>AI-HUD Dashboard</title>
 <link rel="icon" type="image/svg+xml" href="data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><circle cx='16' cy='16' r='15' fill='%230e1118'/><circle cx='16' cy='16' r='13' fill='none' stroke='%233787ff' stroke-width='2'/><text x='16' y='16' dy='0.32em' font-family='-apple-system,Segoe UI,Arial,sans-serif' font-size='13' font-weight='800' fill='%233787ff' text-anchor='middle'>AI</text></svg>">
 <style>
   :root {
-    --bg: #080a0f;
-    --header: #0e1118;
-    --row-a: #0c0f15;
-    --row-b: #10131b;
-    --sep: #1c202a;
-    --white: #ebf0fc;
-    --dim: #5058707c;
-    --desc: #41485c;
-    --accent: #3787ff;
-    --green: #2dd26e;
-    --red: #f5373c;
-    --on: #28be64;
-    --off: #323744;
-    --knob: #e6ebf5;
-    --danger: #641a1e;
-    --danger-border: #a0282d;
-    --btn: #1e2330;
-    --btn-border: #2d3241;
+    --bg: #080a0f; --card: #0e1118; --sep: #1c202a;
+    --white: #ebf0fc; --dim: #6c7390; --desc: #525a73;
+    --accent: #3787ff; --green: #2dd26e; --red: #f5373c; --amber: #f5b342;
+    --on: #28be64; --off: #323744; --knob: #e6ebf5;
   }
   * { box-sizing: border-box; }
   html, body { margin: 0; padding: 0; background: var(--bg); color: var(--white);
     font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-    font-size: 14px; }
+    font-size: 14px; -webkit-font-smoothing: antialiased; }
   main { max-width: 720px; margin: 0 auto; padding: 16px 20px 80px; }
   header.bar { display: flex; align-items: center; justify-content: space-between;
     padding: 14px 4px 18px; border-bottom: 2px solid var(--accent); }
@@ -165,83 +127,80 @@ _INDEX_HTML = """<!DOCTYPE html>
   header.bar .status.ok::before  { content: "\\25CF "; color: var(--green); }
   header.bar .status.bad::before { content: "\\25CF "; color: var(--red); }
   section.card { margin-top: 24px; }
-  section.card h2 { font-size: 14px; color: var(--dim); margin: 0 0 8px;
-    text-transform: uppercase; letter-spacing: 1px; }
-  .row { display: flex; align-items: center; justify-content: space-between;
-    padding: 14px 16px; border-bottom: 1px solid var(--sep); }
-  .row:nth-child(odd)  { background: var(--row-a); }
-  .row:nth-child(even) { background: var(--row-b); }
-  .row .meta { flex: 1; min-width: 0; }
-  .row .label { font-weight: 500; }
-  .row .desc  { font-size: 12px; color: var(--desc); margin-top: 2px; }
-  .row .control { flex-shrink: 0; margin-left: 16px; display: flex;
-    align-items: center; gap: 8px; }
-  /* iOS-style toggle */
-  .toggle { position: relative; width: 48px; height: 26px; background: var(--off);
-    border-radius: 13px; cursor: pointer; transition: background 0.15s; }
+  section.card h2 { font-size: 12px; color: var(--dim); margin: 0 0 8px;
+    text-transform: uppercase; letter-spacing: 1.5px; }
+  .panel { background: var(--card); border-radius: 8px; padding: 4px 0;
+    border: 1px solid var(--sep); overflow: hidden; }
+  .stat { display: flex; align-items: center; justify-content: space-between;
+    padding: 12px 18px; border-bottom: 1px solid var(--sep); }
+  .stat:last-child { border-bottom: none; }
+  .stat .label { color: var(--dim); font-size: 13px; }
+  .stat .value { font-variant-numeric: tabular-nums; }
+  .stat .value.big { font-size: 18px; font-weight: 600; }
+  .stat .value.muted { color: var(--dim); }
+  .stat .value.ok { color: var(--green); }
+  .stat .value.warn { color: var(--amber); }
+  .stat .value.bad { color: var(--red); }
+  .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%;
+    margin-right: 6px; vertical-align: middle; }
+  .dot.ok  { background: var(--green); }
+  .dot.bad { background: var(--red); }
+  .setting { display: flex; align-items: center; justify-content: space-between;
+    padding: 14px 18px; border-bottom: 1px solid var(--sep); }
+  .setting:last-child { border-bottom: none; }
+  .setting .meta { flex: 1; min-width: 0; margin-right: 14px; }
+  .setting .meta .l { font-weight: 500; }
+  .setting .meta .d { font-size: 12px; color: var(--desc); margin-top: 3px; line-height: 1.4; }
+  .toggle { position: relative; width: 46px; height: 26px; background: var(--off);
+    border-radius: 13px; cursor: pointer; transition: background 0.15s; flex-shrink: 0; }
   .toggle.on { background: var(--on); }
   .toggle::after { content: ""; position: absolute; width: 20px; height: 20px;
     border-radius: 50%; background: var(--knob); top: 3px; left: 3px;
     transition: left 0.15s; }
-  .toggle.on::after { left: 25px; }
-  /* Choice buttons */
-  .choice { display: flex; gap: 4px; }
-  .choice button { padding: 6px 14px; background: var(--btn);
-    border: 1px solid var(--btn-border); color: var(--dim); border-radius: 4px;
-    cursor: pointer; font-size: 13px; font-family: inherit; }
-  .choice button.active { background: var(--accent); border-color: var(--accent);
-    color: white; }
-  /* Number stepper */
-  .stepper { display: flex; align-items: center; gap: 4px; }
-  .stepper button { width: 32px; height: 32px; background: var(--btn);
-    border: 1px solid var(--btn-border); color: var(--white); cursor: pointer;
-    font-size: 16px; font-family: inherit; border-radius: 4px; }
-  .stepper button.minus { color: var(--red); }
-  .stepper button.plus  { color: var(--green); }
-  .stepper .value { min-width: 64px; text-align: center; font-variant-numeric: tabular-nums; }
-  /* Danger button */
-  .danger-btn { width: 100%; padding: 12px; background: var(--danger);
-    border: 1px solid var(--danger-border); color: var(--white); cursor: pointer;
-    font-size: 14px; font-family: inherit; border-radius: 4px; margin-top: 8px; }
-  /* Toast */
+  .toggle.on::after { left: 23px; }
   #toast { position: fixed; bottom: 24px; left: 50%; transform: translateX(-50%);
-    padding: 10px 18px; background: var(--btn); border: 1px solid var(--btn-border);
+    padding: 10px 18px; background: var(--card); border: 1px solid var(--sep);
     border-radius: 4px; font-size: 13px; opacity: 0; transition: opacity 0.2s;
     pointer-events: none; }
   #toast.show { opacity: 1; }
   #toast.err { border-color: var(--red); color: var(--red); }
-  footer { margin-top: 32px; padding: 12px 4px; font-size: 12px; color: var(--dim);
+  footer { margin-top: 32px; padding: 12px 4px; font-size: 11px; color: var(--dim);
     border-top: 1px solid var(--sep); display: flex; justify-content: space-between; }
 </style>
 </head>
 <body>
 <main>
   <header class="bar">
-    <h1>AI-HUD Settings</h1>
+    <h1>AI-HUD Dashboard</h1>
     <span id="conn" class="status">connecting...</span>
   </header>
+
   <section class="card">
-    <h2>Display &amp; Detection</h2>
-    <div id="settings-list"></div>
+    <h2>Live status</h2>
+    <div class="panel">
+      <div class="stat"><span class="label">GPS</span><span class="value muted" id="s-gps">--</span></div>
+      <div class="stat"><span class="label">Speed limit</span><span class="value big muted" id="s-limit">--</span></div>
+      <div class="stat"><span class="label">NPU detection</span><span class="value muted" id="s-npu">--</span></div>
+      <div class="stat"><span class="label">Day / night</span><span class="value muted" id="s-night">--</span></div>
+      <div class="stat"><span class="label">Region</span><span class="value muted" id="s-region">--</span></div>
+    </div>
   </section>
+
   <section class="card">
-    <h2>Fusion Parameters</h2>
-    <div id="fusion-list"></div>
-    <button class="danger-btn" id="reset-btn">Reset Fusion Defaults</button>
+    <h2>Setup</h2>
+    <div class="panel" id="setup-panel"></div>
   </section>
+
   <footer>
     <span id="ver">v?</span>
-    <span id="region">--</span>
+    <span>Tip: most settings are automatic -- nothing to configure.</span>
   </footer>
 </main>
 <div id="toast"></div>
 <script>
 "use strict";
 const $ = (id) => document.getElementById(id);
-let SCHEMA = null;
-let STATE = null;
-let pollTimer = null;
-let pendingPost = 0;
+let SCHEMA = null, STATE = null, pendingPost = 0, _stateSig = null;
 
 function toast(msg, isErr) {
   const t = $("toast");
@@ -249,38 +208,28 @@ function toast(msg, isErr) {
   t.className = "show" + (isErr ? " err" : "");
   setTimeout(() => { t.className = ""; }, 1800);
 }
-
 function setConn(ok, label) {
-  const c = $("conn");
-  c.className = "status " + (ok ? "ok" : "bad");
-  c.textContent = label || (ok ? "connected" : "disconnected");
+  $("conn").className = "status " + (ok ? "ok" : "bad");
+  $("conn").textContent = label || (ok ? "connected" : "disconnected");
 }
 
 async function fetchSchema() {
-  // Static -- fetched once at boot.
   const r = await fetch("/api/schema", { cache: "no-store" });
-  const data = await r.json();
-  SCHEMA = data.schema;
+  SCHEMA = (await r.json()).schema;
 }
-
-let _stateSig = null;
 async function fetchState() {
   try {
     const r = await fetch("/api/state", { cache: "no-store" });
     if (!r.ok) throw new Error("HTTP " + r.status);
     const data = await r.json();
     setConn(true, "live");
-    // Skip DOM rebuild if nothing changed (prevents 2s polling flicker).
     const sig = JSON.stringify(data);
     if (sig === _stateSig) return;
-    _stateSig = sig;
-    STATE = data;
-    render();
+    _stateSig = sig; STATE = data; render();
   } catch (e) {
     setConn(false, "device offline");
   }
 }
-
 async function postConfig(section, key, value) {
   pendingPost++;
   try {
@@ -291,33 +240,43 @@ async function postConfig(section, key, value) {
     });
     const data = await r.json();
     if (!data.ok) throw new Error(data.error || "save failed");
-    STATE = data.state;
-    _stateSig = JSON.stringify(STATE);
-    render();
-    toast("saved");
+    STATE = data.state; _stateSig = JSON.stringify(STATE);
+    render(); toast("saved");
   } catch (e) {
     toast("save failed: " + e.message, true);
-  } finally {
-    pendingPost--;
-  }
+  } finally { pendingPost--; }
 }
 
-async function postReset() {
-  if (!confirm("Reset all fusion parameters to defaults?")) return;
-  pendingPost++;
-  try {
-    const r = await fetch("/api/action/reset", { method: "POST" });
-    const data = await r.json();
-    if (!data.ok) throw new Error(data.error || "reset failed");
-    STATE = data.state;
-    _stateSig = JSON.stringify(STATE);
-    render();
-    toast("fusion reset to defaults");
-  } catch (e) {
-    toast("reset failed: " + e.message, true);
-  } finally {
-    pendingPost--;
+function renderStatus(st) {
+  const gpsOk = st.gps_valid === true;
+  $("s-gps").innerHTML =
+    `<span class="dot ${gpsOk ? "ok" : "bad"}"></span>` +
+    (gpsOk ? `${st.gps_sats ?? 0} sats` : "no fix") +
+    (st.gps_age_s !== undefined ? `  ·  ${st.gps_age_s}s ago` : "");
+  $("s-gps").className = "value";
+
+  if (st.speed_limit) {
+    $("s-limit").textContent = `${st.speed_limit} km/h  ·  ${st.speed_limit_source || "default"}`;
+    $("s-limit").className = "value big";
+  } else {
+    $("s-limit").textContent = "--"; $("s-limit").className = "value big muted";
   }
+
+  if (st.npu_running) {
+    $("s-npu").innerHTML = `<span class="dot ok"></span>running` +
+      (st.last_detection ? `  ·  last: ${st.last_detection}` : "");
+    $("s-npu").className = "value ok";
+  } else {
+    $("s-npu").innerHTML = `<span class="dot bad"></span>idle`;
+    $("s-npu").className = "value bad";
+  }
+
+  if (st.night_mode === true)       { $("s-night").textContent = "NIGHT (auto)"; $("s-night").className = "value warn"; }
+  else if (st.night_mode === false) { $("s-night").textContent = "DAY (auto)";   $("s-night").className = "value ok"; }
+  else                              { $("s-night").textContent = "--";           $("s-night").className = "value muted"; }
+
+  $("s-region").textContent = (st.region || "--").toUpperCase() + " (auto)";
+  $("s-region").className = "value";
 }
 
 function makeToggle(section, item, value) {
@@ -326,102 +285,32 @@ function makeToggle(section, item, value) {
   t.onclick = () => postConfig(section, item.key, value ? 0 : 1);
   return t;
 }
-
-function makeChoice(section, item, value) {
-  const wrap = document.createElement("div");
-  wrap.className = "choice";
-  for (const c of item.choices) {
-    const btn = document.createElement("button");
-    btn.textContent = (item.display && item.display[c]) || c.toUpperCase();
-    if (c === value) btn.classList.add("active");
-    btn.onclick = () => { if (c !== value) postConfig(section, item.key, c); };
-    wrap.appendChild(btn);
-  }
-  return wrap;
-}
-
-function makeStepper(section, item, value) {
-  const wrap = document.createElement("div");
-  wrap.className = "stepper";
-  const minus = document.createElement("button");
-  minus.className = "minus";
-  minus.textContent = "−";
-  const valEl = document.createElement("span");
-  valEl.className = "value";
-  valEl.textContent = (item.kind === "float") ? value.toFixed(2) : value;
-  const plus = document.createElement("button");
-  plus.className = "plus";
-  plus.textContent = "+";
-  minus.onclick = () => {
-    let v = Math.max(item.min, value - item.step);
-    if (item.kind === "int") v = Math.round(v);
-    else v = Math.round(v * 100) / 100;
-    if (v !== value) postConfig(section, item.key, v);
-  };
-  plus.onclick = () => {
-    let v = Math.min(item.max, value + item.step);
-    if (item.kind === "int") v = Math.round(v);
-    else v = Math.round(v * 100) / 100;
-    if (v !== value) postConfig(section, item.key, v);
-  };
-  wrap.appendChild(minus);
-  wrap.appendChild(valEl);
-  wrap.appendChild(plus);
-  return wrap;
-}
-
-function renderItem(section, item, value) {
+function renderSettingItem(section, item, value) {
   const row = document.createElement("div");
-  row.className = "row";
-  const meta = document.createElement("div");
-  meta.className = "meta";
-  const label = document.createElement("div");
-  label.className = "label";
-  label.textContent = item.label;
-  meta.appendChild(label);
-  if (item.desc) {
-    const d = document.createElement("div");
-    d.className = "desc";
-    d.textContent = item.desc;
-    meta.appendChild(d);
-  }
+  row.className = "setting";
+  const meta = document.createElement("div"); meta.className = "meta";
+  const l = document.createElement("div"); l.className = "l"; l.textContent = item.label; meta.appendChild(l);
+  if (item.desc) { const d = document.createElement("div"); d.className = "d"; d.textContent = item.desc; meta.appendChild(d); }
   row.appendChild(meta);
-  const ctrl = document.createElement("div");
-  ctrl.className = "control";
-  let widget = null;
-  if (item.kind === "toggle")        widget = makeToggle(section, item, value);
-  else if (item.kind === "choice")   widget = makeChoice(section, item, value);
-  else if (item.kind === "int" || item.kind === "float")
-                                     widget = makeStepper(section, item, value);
-  if (widget) ctrl.appendChild(widget);
-  row.appendChild(ctrl);
+  if (item.kind === "toggle") row.appendChild(makeToggle(section, item, value));
   return row;
 }
-
 function render() {
-  if (!SCHEMA || !STATE) return;
-  const sList = $("settings-list");
-  const fList = $("fusion-list");
-  sList.innerHTML = "";
-  fList.innerHTML = "";
-  for (const item of (SCHEMA.settings || [])) {
-    sList.appendChild(renderItem("settings", item, STATE.settings[item.key]));
+  if (!STATE) return;
+  renderStatus(STATE.status || {});
+  $("ver").textContent = "v" + (STATE.status && STATE.status.version || "?");
+  const setup = $("setup-panel"); setup.innerHTML = "";
+  if (SCHEMA && SCHEMA.settings && SCHEMA.settings.length) {
+    for (const item of SCHEMA.settings) {
+      setup.appendChild(renderSettingItem("settings", item, STATE.settings[item.key]));
+    }
+  } else {
+    setup.innerHTML = '<div class="stat"><span class="label">Everything is automatic.</span></div>';
   }
-  for (const item of (SCHEMA.fusion || [])) {
-    fList.appendChild(renderItem("fusion", item, STATE.fusion[item.key]));
-  }
-  $("ver").textContent = "v" + (STATE.version || "?");
-  $("region").textContent = (STATE.region || "--").toUpperCase()
-    + " | NPU " + (STATE.npu_running ? "ON" : "OFF");
 }
 
-$("reset-btn").onclick = postReset;
-
-// Fetch static schema once, then poll state every 2s for liveness.
 fetchSchema().then(fetchState).catch(() => setConn(false, "device offline"));
-pollTimer = setInterval(() => {
-  if (pendingPost === 0) fetchState();
-}, 2000);
+setInterval(() => { if (pendingPost === 0) fetchState(); }, 2000);
 </script>
 </body>
 </html>
@@ -502,15 +391,8 @@ class _Handler(BaseHTTPRequestHandler):
             self._send_json({"ok": True, "state": self.server_ctx.snapshot()})
             return
 
-        if self.path == "/api/action/reset":
-            try:
-                self.server_ctx.reset_fusion()
-            except Exception as e:
-                self._send_json({"ok": False, "error": str(e)}, 500)
-                return
-            self._send_json({"ok": True, "state": self.server_ctx.snapshot()})
-            return
-
+        # /api/action/reset removed -- fusion params are no longer surfaced
+        # to end users, so there's nothing to reset from the dashboard.
         self._send_json({"ok": False, "error": "not found"}, status=404)
 
 
@@ -519,14 +401,12 @@ class _Handler(BaseHTTPRequestHandler):
 # ---------------------------------------------------------------------------
 
 
-# Map of (section, key) -> callback name in the callbacks dict.
-# Fusion params share a single reload callback; settings keys are per-field.
+# Dispatch table for user-editable settings. Anything else hitting
+# /api/config is rejected. region/night_mode/display_mode/npu_enabled
+# changed callbacks remain wired in hud_live.py for internal runtime
+# updates -- they're just no longer reachable from the dashboard.
 _CALLBACK_MAP = {
-    ("settings", "npu_enabled"):    "on_npu_toggle",
-    ("settings", "night_mode"):     "on_night_mode_change",
     ("settings", "mirror_display"): "on_mirror_change",
-    ("settings", "region"):         "on_region_change",
-    ("settings", "display_mode"):   "on_display_mode_change",
 }
 
 
@@ -544,54 +424,62 @@ class WebConfigServer:
     """
 
     def __init__(self, config, region_mgr, app_version, host=DEFAULT_HOST,
-                 port=DEFAULT_PORT, npu_state_fn=None, callbacks=None):
+                 port=DEFAULT_PORT, status_fn=None, callbacks=None):
         self.config = config
         self.region_mgr = region_mgr
         self.app_version = app_version
         self.host = host
         self.port = port
-        # Lets us reflect runtime NPU state (which may diverge from config
-        # if the C side rejected the toggle). Optional.
-        self._npu_state_fn = npu_state_fn or (
-            lambda: bool(config.get_int("settings", "npu_enabled")))
+        # Optional callable returning a dict of runtime status fields.
+        # hud_live.py injects one that reports live GPS / NPU / day-night
+        # state -- the dashboard shows these as read-only telemetry.
+        self._status_fn = status_fn or (lambda: {})
         self._cb = callbacks or {}
         self._httpd = None
         self._thread = None
 
     # -- snapshot for /api/state -----------------------------------------
-    # Schema is fetched separately via /api/schema -- keep this payload small
-    # so the 2s polling loop stays cheap on the USB link.
+    # Mostly a status payload (GPS, NPU, day/night, etc.) plus the small
+    # set of user-editable settings. Schema is fetched separately via
+    # /api/schema -- keep this payload small so the 2s poll stays cheap.
     def snapshot(self):
         settings = {}
-        fusion = {}
-        for (section, key), (typ, _d, _vmin, _vmax) in PARAM_DEFS.items():
+        for (section, key) in _USER_EDITABLE:
+            if (section, key) not in PARAM_DEFS:
+                continue
+            typ = PARAM_DEFS[(section, key)][0]
             if typ is int:
-                v = self.config.get_int(section, key)
+                settings[key] = self.config.get_int(section, key)
             elif typ is float:
-                v = self.config.get_float(section, key)
+                settings[key] = self.config.get_float(section, key)
             else:
-                v = self.config.get_str(section, key)
-            if section == "settings":
-                settings[key] = v
-            elif section == "fusion":
-                fusion[key] = v
-        return {
-            "settings": settings,
-            "fusion": fusion,
+                settings[key] = self.config.get_str(section, key)
+
+        status = {
             "region": self.region_mgr.region,
             "version": self.app_version,
-            "npu_running": bool(self._npu_state_fn()),
         }
+        # Pull live telemetry from hud_live.py if it provided a status_fn.
+        try:
+            extra = self._status_fn() or {}
+            status.update(extra)
+        except Exception as e:
+            status["status_error"] = str(e)
+        return {"settings": settings, "status": status}
 
     # -- apply config change ---------------------------------------------
     def apply(self, section, key, value):
+        # The dashboard can only write the small whitelist of settings the
+        # operator legitimately needs (install-time mirror toggle today).
+        # Everything else lives in /root/ai_hud.conf as a developer knob.
+        if (section, key) not in _USER_EDITABLE:
+            raise ValueError(f"param not editable from dashboard: {section}.{key}")
         if (section, key) not in PARAM_DEFS:
             raise ValueError(f"unknown param: {section}.{key}")
 
         self.config.set(section, key, value)
         self.config.save()
 
-        # Re-read what we actually stored (after clamp/coerce).
         typ = PARAM_DEFS[(section, key)][0]
         if typ is int:
             new_val = self.config.get_int(section, key)
@@ -600,32 +488,17 @@ class WebConfigServer:
         else:
             new_val = self.config.get_str(section, key)
 
-        # Dispatch to the matching callback (table-driven).
-        if section == "fusion":
-            cb = self._cb.get("on_fusion_reload")
-            if cb:
-                cb()
-            return
-
         cb_name = _CALLBACK_MAP.get((section, key))
         if cb_name is None:
             return
         cb = self._cb.get(cb_name)
         if cb is None:
             return
-        # int 0/1 params semantically represent booleans for these callbacks.
         if typ is int and PARAM_DEFS[(section, key)][2] == 0 \
                 and PARAM_DEFS[(section, key)][3] == 1:
             cb(bool(new_val))
         else:
             cb(new_val)
-
-    def reset_fusion(self):
-        self.config.reset_section("fusion")
-        self.config.save()
-        cb = self._cb.get("on_fusion_reload")
-        if cb:
-            cb()
 
     # -- lifecycle -------------------------------------------------------
     def start_in_thread(self):
