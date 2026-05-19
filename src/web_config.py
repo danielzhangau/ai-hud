@@ -183,6 +183,7 @@ _INDEX_HTML = """<!DOCTYPE html>
       <div class="stat"><span class="label">NPU detection</span><span class="value muted" id="s-npu">--</span></div>
       <div class="stat"><span class="label">Day / night</span><span class="value muted" id="s-night">--</span></div>
       <div class="stat"><span class="label">Region</span><span class="value muted" id="s-region">--</span></div>
+      <div class="stat"><span class="label">Speed DB</span><span class="value muted" id="s-db">--</span></div>
     </div>
   </section>
 
@@ -277,6 +278,15 @@ function renderStatus(st) {
 
   $("s-region").textContent = (st.region || "--").toUpperCase() + " (auto)";
   $("s-region").className = "value";
+
+  if (st.db_info) {
+    const dateStr = st.db_built ? `  ·  built ${st.db_built}` : "";
+    $("s-db").textContent = st.db_info + dateStr;
+    $("s-db").className = "value";
+  } else {
+    $("s-db").textContent = "no database loaded";
+    $("s-db").className = "value muted";
+  }
 }
 
 function makeToggle(section, item, value) {

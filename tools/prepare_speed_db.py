@@ -44,14 +44,19 @@ except ImportError:
 # Binary format (must match src/speed_db.py)
 # ---------------------------------------------------------------------------
 
-HEADER_FMT = "<4sHIHI"
+# v1 layout (legacy, kept for reference): magic, version, count, rec_size, flags
+#   "<4sHIHI" = 16 bytes
+# v2 layout (current): adds build_epoch -- a uint32 Unix timestamp of the
+#   moment this build script wrote the file. Lets the device + dashboard
+#   surface DB freshness without an external manifest.
+HEADER_FMT = "<4sHIHII"     # magic, version, count, rec_size, flags, build_epoch
 HEADER_SIZE = struct.calcsize(HEADER_FMT)
 RECORD_FMT = "<iiBBHI"
 RECORD_SIZE = struct.calcsize(RECORD_FMT)
 
 MAGIC_ZONES = b"SZON"
 MAGIC_CAMERAS = b"SCAM"
-DB_VERSION = 1
+DB_VERSION = 2
 
 # Camera type mapping from config string to int
 CAM_TYPE_INT = {
@@ -127,9 +132,10 @@ def write_db(path, magic, records, grid_res):
 
     keyed.sort(key=lambda x: x[0])
 
+    build_epoch = int(time.time())
     with open(path, "wb") as f:
         f.write(struct.pack(HEADER_FMT, magic, DB_VERSION,
-                            len(keyed), RECORD_SIZE, 0))
+                            len(keyed), RECORD_SIZE, 0, build_epoch))
         for gk, lat_e6, lon_e6, speed, rtype, bearing in keyed:
             f.write(struct.pack(RECORD_FMT,
                                 lat_e6, lon_e6, speed, rtype, bearing, gk))

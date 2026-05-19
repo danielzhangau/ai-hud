@@ -535,8 +535,16 @@ def main():
                 zones_path=zones_path if zones_ok else None,
                 cameras_path=cameras_path if cameras_ok else None,
             )
+            # Format build_epoch as a date for human-readable log + dashboard.
+            # 0 = legacy v1 file without build_epoch -- show "unknown".
+            if db.build_epoch:
+                built = datetime.datetime.utcfromtimestamp(
+                    db.build_epoch).strftime("%Y-%m-%d")
+            else:
+                built = "unknown"
             print(f"Speed DB [{region_mgr.region.upper()}]: "
-                  f"{db.zone_count} zones, {db.camera_count} cameras")
+                  f"{db.zone_count} zones, {db.camera_count} cameras, "
+                  f"built {built}")
         else:
             print(f"Speed DB [{region_mgr.region.upper()}]: "
                   f"no database files found, using NPU only")
@@ -691,6 +699,18 @@ def main():
                 npu_lim = getattr(detect, "raw_npu_speed_limit", 0)
                 if npu_lim:
                     last_det = f"{npu_lim} km/h"
+                db_info = None
+                if speed_db is not None:
+                    parts = []
+                    if speed_db.zone_count:
+                        parts.append(f"{speed_db.zone_count:,} zones")
+                    if speed_db.camera_count:
+                        parts.append(f"{speed_db.camera_count:,} cameras")
+                    db_info = ", ".join(parts) if parts else None
+                db_built = None
+                if speed_db is not None and speed_db.build_epoch:
+                    db_built = datetime.datetime.utcfromtimestamp(
+                        speed_db.build_epoch).strftime("%Y-%m-%d")
                 return {
                     "gps_valid":  gps.valid,
                     "gps_sats":   gps.satellites,
@@ -700,6 +720,8 @@ def main():
                     "npu_running": detect.npu_enabled,
                     "last_detection": last_det,
                     "night_mode": bool(auto_night_state["current"]),
+                    "db_info":    db_info,
+                    "db_built":   db_built,
                 }
 
             web_server = WebConfigServer(

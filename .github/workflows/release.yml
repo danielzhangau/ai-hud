@@ -61,16 +61,31 @@ jobs:
           name: ${{ needs.build.outputs.artifact-name }}
           path: firmware
 
+      # Stage the speed databases alongside firmware so a single release
+      # bundles everything an operator needs to bring a device up to a
+      # known-good state without re-running the full SDK build locally.
+      - name: Stage speed databases
+        run: |
+          mkdir -p firmware/data
+          cp data/speed_zones.db    firmware/data/ 2>/dev/null || true
+          cp data/speed_cameras.db  firmware/data/ 2>/dev/null || true
+          cp data/speed_zones_cn.db firmware/data/ 2>/dev/null || true
+          cp data/speed_cameras_cn.db firmware/data/ 2>/dev/null || true
+          ls -la firmware/data/ || true
+
       # Add SHA-256 checksums so users can verify downloads.
       - name: Compute checksums
         working-directory: firmware
         run: |
           # `find` (not glob) so the loop is silent when an extension has zero
           # matches; -print0 / -0 keeps spaces-in-names safe; redirect once.
-          find . -maxdepth 1 -type f \( -name "*.img" -o -name "*.bin" \) \
+          # Includes *.db so the speed database checksums ship in the same
+          # SHA256SUMS file as the firmware images.
+          find . -maxdepth 2 -type f \( -name "*.img" -o -name "*.bin" -o -name "*.db" \) \
             -print0 | xargs -0 -r sha256sum > SHA256SUMS
-          echo "--- firmware bundle ---"
+          echo "--- release bundle ---"
           ls -la
+          ls -la data/ 2>/dev/null || true
           echo "--- SHA256SUMS ---"
           cat SHA256SUMS
           test -s SHA256SUMS || { echo "ERROR: no firmware images found"; exit 1; }
@@ -88,10 +103,12 @@ jobs:
           prerelease: ${{ startsWith(github.ref_name, 'v0.') || contains(github.ref_name, '-') }}
           files: |
             firmware/*.img
+            firmware/data/*.db
             firmware/SHA256SUMS
           # Fail the workflow if firmware/*.img isn't present so we never
-          # ship an empty release. Falsey before because *.bin was optional;
-          # we now only require the mandatory .img and SHA256SUMS.
+          # ship an empty release. The .db glob is forgiving on its own --
+          # action-gh-release treats an unmatched glob as a warning -- so
+          # missing speed databases won't abort a release on their own.
           fail_on_unmatched_files: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

@@ -35,14 +35,22 @@ import time as _time
 # Constants
 # ---------------------------------------------------------------------------
 
-HEADER_FMT = "<4sHIHI"          # magic, version, count, rec_size, flags
-HEADER_SIZE = struct.calcsize(HEADER_FMT)  # 16 bytes
+# Header layouts -- writer always emits v2; reader accepts both for back-
+# compatibility with .db files produced before 2026-05-19.
+HEADER_FMT_V1 = "<4sHIHI"           # magic, version, count, rec_size, flags
+HEADER_FMT_V2 = "<4sHIHII"          # ... + build_epoch (uint32 unix time)
+HEADER_SIZE_V1 = struct.calcsize(HEADER_FMT_V1)  # 16 bytes
+HEADER_SIZE_V2 = struct.calcsize(HEADER_FMT_V2)  # 20 bytes
+# Kept under the original name so existing imports don't break.
+HEADER_FMT = HEADER_FMT_V2
+HEADER_SIZE = HEADER_SIZE_V2
+
 RECORD_FMT = "<iiBBHI"          # lat_e6, lon_e6, speed, type, bearing, grid_key
 RECORD_SIZE = struct.calcsize(RECORD_FMT)  # 16 bytes
 
 MAGIC_ZONES = b"SZON"
 MAGIC_CAMERAS = b"SCAM"
-DB_VERSION = 1
+DB_VERSION = 2
 
 # Grid size for spatial indexing (degrees).
 # 0.005 deg ~ 550m lat, ~450m lon at -33 deg (Sydney).
@@ -150,6 +158,9 @@ class SpeedDB:
         self._camera_grid = {}   # grid_key -> [_Record, ...]
         self._zone_count = 0
         self._camera_count = 0
+        # Latest build_epoch read from any loaded file; 0 means "unknown"
+        # (v1 file, or no file loaded). Surfaced by the dashboard.
+        self.build_epoch = 0
 
         if zones_path and os.path.isfile(zones_path):
             self._load(zones_path, MAGIC_ZONES, self._zone_grid)
@@ -157,18 +168,37 @@ class SpeedDB:
             self._load(cameras_path, MAGIC_CAMERAS, self._camera_grid)
 
     def _load(self, path, expected_magic, grid):
-        """Load binary database file into grid index."""
+        """Load binary database file into grid index.
+
+        Accepts both v1 (16-byte header, no build_epoch) and v2 (20-byte
+        header, with build_epoch) files. Older zones/cameras dbs from
+        pre-2026-05-19 should keep working until the next OSM refresh.
+        """
         with open(path, "rb") as f:
-            hdr = f.read(HEADER_SIZE)
-            if len(hdr) < HEADER_SIZE:
+            # Peek at the version field by reading the v1-sized prefix; if it
+            # turns out to be v2 we read the extra 4 bytes after.
+            hdr_v1 = f.read(HEADER_SIZE_V1)
+            if len(hdr_v1) < HEADER_SIZE_V1:
                 return
-            magic, version, count, rec_size, flags = struct.unpack(HEADER_FMT, hdr)
+            magic, version, count, rec_size, flags = struct.unpack(
+                HEADER_FMT_V1, hdr_v1)
             if magic != expected_magic:
                 print(f"[speed_db] WARNING: bad magic in {path}: {magic}")
                 return
             if rec_size != RECORD_SIZE:
                 print(f"[speed_db] WARNING: record size mismatch in {path}: "
                       f"{rec_size} != {RECORD_SIZE}")
+                return
+            if version == 1:
+                build_epoch = 0
+            elif version == 2:
+                extra = f.read(HEADER_SIZE_V2 - HEADER_SIZE_V1)
+                if len(extra) < 4:
+                    return
+                (build_epoch,) = struct.unpack("<I", extra)
+            else:
+                print(f"[speed_db] WARNING: unsupported DB version in {path}: "
+                      f"{version}")
                 return
 
             data = f.read(count * RECORD_SIZE)
@@ -188,6 +218,10 @@ class SpeedDB:
             self._zone_count = loaded
         else:
             self._camera_count = loaded
+        # Track the most recent build_epoch across loaded files; zones
+        # and cameras may have different build times if rebuilt separately.
+        if build_epoch > self.build_epoch:
+            self.build_epoch = build_epoch
 
         print(f"[speed_db] Loaded {loaded} records from {os.path.basename(path)} "
               f"({len(grid)} buckets)")
