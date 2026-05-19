@@ -63,6 +63,7 @@ ai-hud/
 │   ├── hud_live.py           # HUD renderer, GPS, RegionManager, bitmap font
 │   ├── speed_db.py           # Offline speed limit + camera spatial lookup
 │   ├── config_manager.py     # Persistent JSON config with atomic writes
+│   ├── web_config.py         # PC-side config UI over USB (adb forward 8080)
 │   ├── settings_ui.py        # Touch settings overlay (dark theme)
 │   ├── touch_input.py        # GT911 I2C userspace driver with stall recovery
 │   ├── gps_reader.py         # NMEA sentence parser
@@ -70,7 +71,8 @@ ai-hud/
 │   └── generate_hud_mockups*.py  # Mockup image generators
 ├── scripts/
 │   ├── S01_ai_hud_splash     # Earliest init: hide kernel logo, show splash
-│   └── S99_ai_hud            # Main init: watchdog loops for both processes
+│   ├── S99_ai_hud            # Main init: watchdog loops for both processes
+│   └── web_config.sh         # One-shot: adb forward + open browser to config UI
 ├── data/
 │   ├── speed_zones.db        # AU: 171K zones from OSM (2.7 MB)
 │   ├── speed_zones_cn.db     # CN: 20K zones from OSM (322 KB)
@@ -166,6 +168,7 @@ adb push src/hud_live.py /root/hud_live.py
 adb push src/settings_ui.py /root/settings_ui.py
 adb push src/touch_input.py /root/touch_input.py
 adb push src/config_manager.py /root/config_manager.py
+adb push src/web_config.py /root/web_config.py
 adb push src/speed_db.py /root/speed_db.py
 adb push src/gps_reader.py /root/gps_reader.py
 
@@ -206,6 +209,36 @@ adb shell 'cat /tmp/ai_hud_detect'       # NPU detection results
 adb shell 'cat /var/log/ai_hud.log'       # Python HUD log
 adb shell 'cat /var/log/ai_hud_c.log'     # C binary log
 ```
+
+## Configuration UI (PC over USB)
+
+When the GT911 touchscreen is unavailable (e.g. hardware failure), all
+settings are still reachable through a browser on the development PC. The
+HUD process embeds a small HTTP server on `127.0.0.1:8080`, which is exposed
+to the PC via `adb forward`.
+
+One-shot launch (recommended):
+
+```bash
+./scripts/web_config.sh
+```
+
+The script runs `adb forward tcp:8080 tcp:8080`, probes the device, and opens
+`http://localhost:8080` in the default browser.
+
+Manual equivalent:
+
+```bash
+adb forward tcp:8080 tcp:8080
+open http://localhost:8080      # macOS
+xdg-open http://localhost:8080  # Linux
+```
+
+Exposes all `settings` and `fusion` parameters from `ai_hud.conf` with the
+same callbacks the touch UI uses, so changes are applied live (NPU on/off,
+display mode, mirror, night mode, region, fusion thresholds) and persisted
+atomically. The server is bound to `127.0.0.1` only and is reachable solely
+through the USB-mediated `adb forward` tunnel.
 
 ## CI/CD Workflows
 

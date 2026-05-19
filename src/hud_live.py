@@ -523,6 +523,48 @@ def main():
     nmea_buf = b""
     hud_state = HUDState()
 
+    # --- Shared config-change callbacks ---
+    # Defined here so both the (optional) touch settings UI and the web
+    # config server can dispatch the same actions when a setting changes.
+    def _on_npu_toggle(enabled):
+        write_npu_enable_ipc(enabled)
+        detect.npu_enabled = enabled
+
+    def _on_region_change(new_region):
+        nonlocal speed_db, speed_fusion
+        region_mgr.region = new_region
+        speed_db, speed_fusion = load_speed_db()
+        hud_state.base_layer = None
+
+    def _on_fusion_reload():
+        nonlocal speed_fusion
+        if SpeedFusion_cls and config:
+            fusion_kwargs = config.get_fusion_params()
+            speed_fusion = SpeedFusion_cls(
+                default_limit=region_mgr.default_limit,
+                **fusion_kwargs)
+
+    def _on_display_mode_change(mode):
+        nonlocal display_mode
+        display_mode = mode
+        write_display_mode_ipc(mode)
+        # Mirror only applies to HUD mode
+        fb.mirror = mirror_enabled and mode != "cam"
+        if mode == "hud":
+            # Switching back to HUD: force full redraw
+            hud_state.base_layer = None
+
+    def _on_mirror_change(enabled):
+        nonlocal mirror_enabled
+        mirror_enabled = enabled
+        fb.mirror = enabled and display_mode != "cam"
+        # Force base layer rebuild so cached layer matches new orientation
+        hud_state.base_layer = None
+
+    def _on_night_mode_change(enabled):
+        write_isp_config_ipc(enabled)
+        print(f"[ISP] Night mode: {'ON' if enabled else 'OFF'}")
+
     # --- Touch input + Settings UI (optional, graceful fallback) ---
     touch = None
     settings_ui = None
@@ -532,47 +574,6 @@ def main():
         touch = TouchInput()
         if touch.available:
             settings_ui = SettingsUI(fb, config, region_mgr, app_version=APP_VERSION)
-
-            # Wire up callbacks
-            def _on_npu_toggle(enabled):
-                write_npu_enable_ipc(enabled)
-                detect.npu_enabled = enabled
-
-            def _on_region_change(new_region):
-                nonlocal speed_db, speed_fusion
-                region_mgr.region = new_region
-                speed_db, speed_fusion = load_speed_db()
-                hud_state.base_layer = None
-
-            def _on_fusion_reload():
-                nonlocal speed_fusion
-                if SpeedFusion_cls and config:
-                    fusion_kwargs = config.get_fusion_params()
-                    speed_fusion = SpeedFusion_cls(
-                        default_limit=region_mgr.default_limit,
-                        **fusion_kwargs)
-
-            def _on_display_mode_change(mode):
-                nonlocal display_mode
-                display_mode = mode
-                write_display_mode_ipc(mode)
-                # Mirror only applies to HUD mode
-                fb.mirror = mirror_enabled and mode != "cam"
-                if mode == "hud":
-                    # Switching back to HUD: force full redraw
-                    hud_state.base_layer = None
-
-            def _on_mirror_change(enabled):
-                nonlocal mirror_enabled
-                mirror_enabled = enabled
-                fb.mirror = enabled and display_mode != "cam"
-                # Force base layer rebuild so cached layer matches new orientation
-                hud_state.base_layer = None
-
-            def _on_night_mode_change(enabled):
-                write_isp_config_ipc(enabled)
-                print(f"[ISP] Night mode: {'ON' if enabled else 'OFF'}")
-
             settings_ui.on_npu_toggle = _on_npu_toggle
             settings_ui.on_region_change = _on_region_change
             settings_ui.on_fusion_reload = _on_fusion_reload
@@ -587,6 +588,34 @@ def main():
         print("Touch: modules not available, settings UI disabled")
     except Exception as e:
         print(f"Touch: init failed ({e}), settings UI disabled")
+
+    # --- Web config server (optional, graceful fallback) ---
+    # Provides a PC-side HTML UI over USB via `adb forward tcp:8080 tcp:8080`.
+    # Independent of touch -- runs whether or not GT911 is present.
+    web_server = None
+    if config is not None:
+        try:
+            from web_config import WebConfigServer
+            web_server = WebConfigServer(
+                config=config,
+                region_mgr=region_mgr,
+                app_version=APP_VERSION,
+                npu_state_fn=lambda: detect.npu_enabled,
+                callbacks={
+                    "on_npu_toggle":          _on_npu_toggle,
+                    "on_region_change":       _on_region_change,
+                    "on_fusion_reload":       _on_fusion_reload,
+                    "on_display_mode_change": _on_display_mode_change,
+                    "on_mirror_change":       _on_mirror_change,
+                    "on_night_mode_change":   _on_night_mode_change,
+                },
+            )
+            if not web_server.start_in_thread():
+                web_server = None
+        except ImportError:
+            print("Web config: module not available")
+        except Exception as e:
+            print(f"Web config: init failed ({e})")
 
     parsers = {
         "RMC": parse_gprmc,
@@ -800,6 +829,12 @@ def main():
         print("\n\nShutting down HUD...")
     finally:
         print("\n[SHUTDOWN] Cleaning up...")
+        # Stop web config server (daemon thread, but close socket cleanly)
+        if web_server is not None:
+            try:
+                web_server.stop()
+            except Exception:
+                pass
         # Close touch input
         if touch:
             try:

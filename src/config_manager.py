@@ -15,6 +15,7 @@ Usage:
 import configparser
 import os
 import tempfile
+import threading
 
 # Default config path on device
 DEFAULT_CONFIG_PATH = "/root/ai_hud.conf"
@@ -40,11 +41,16 @@ PARAM_DEFS = {
     ("settings", "night_mode"):    (int,   0,    0,    1),
 }
 
-# Valid string choices
+# Valid string choices (public: read via get_choices)
 _STR_CHOICES = {
     ("settings", "region"):       ("au", "cn"),
     ("settings", "display_mode"): ("hud", "cam"),
 }
+
+
+def get_choices(section, key):
+    """Return tuple of valid string choices for a parameter, or () if none."""
+    return _STR_CHOICES.get((section, key), ())
 
 
 class ConfigManager:
@@ -54,6 +60,9 @@ class ConfigManager:
         self.path = path or DEFAULT_CONFIG_PATH
         self._cp = configparser.ConfigParser()
         self._dirty = False
+        # Serialize reads/writes between main loop and web config thread.
+        # Re-entrant so save() can be called from inside a set() chain.
+        self._lock = threading.RLock()
 
         if os.path.isfile(self.path):
             self._cp.read(self.path)
@@ -67,12 +76,15 @@ class ConfigManager:
 
     def get_str(self, section, key):
         """Get string value."""
-        return self._cp.get(section, key,
-                            fallback=str(self._default(section, key)))
+        with self._lock:
+            return self._cp.get(section, key,
+                                fallback=str(self._default(section, key)))
 
     def get_int(self, section, key):
         """Get integer value, clamped to valid range."""
-        raw = self.get_str(section, key)
+        with self._lock:
+            raw = self._cp.get(section, key,
+                               fallback=str(self._default(section, key)))
         pdef = PARAM_DEFS.get((section, key))
         try:
             val = int(raw)
@@ -84,7 +96,9 @@ class ConfigManager:
 
     def get_float(self, section, key):
         """Get float value, clamped to valid range."""
-        raw = self.get_str(section, key)
+        with self._lock:
+            raw = self._cp.get(section, key,
+                               fallback=str(self._default(section, key)))
         pdef = PARAM_DEFS.get((section, key))
         try:
             val = float(raw)
@@ -99,10 +113,11 @@ class ConfigManager:
         pdef = PARAM_DEFS.get((section, key))
         if pdef is None:
             # Unknown param, store as-is
-            if not self._cp.has_section(section):
-                self._cp.add_section(section)
-            self._cp.set(section, key, str(value))
-            self._dirty = True
+            with self._lock:
+                if not self._cp.has_section(section):
+                    self._cp.add_section(section)
+                self._cp.set(section, key, str(value))
+                self._dirty = True
             return
 
         typ, default, vmin, vmax = pdef
@@ -127,34 +142,36 @@ class ConfigManager:
             if vmin is not None:
                 value = max(vmin, min(vmax, value))
 
-        if not self._cp.has_section(section):
-            self._cp.add_section(section)
-        self._cp.set(section, key, str(value))
-        self._dirty = True
+        with self._lock:
+            if not self._cp.has_section(section):
+                self._cp.add_section(section)
+            self._cp.set(section, key, str(value))
+            self._dirty = True
 
     def save(self):
         """Atomic write: write to .tmp then rename."""
-        if not self._dirty:
-            return
+        with self._lock:
+            if not self._dirty:
+                return
 
-        dir_name = os.path.dirname(self.path) or "."
-        tmp_path = None
-        try:
-            os.makedirs(dir_name, exist_ok=True)
-            fd, tmp_path = tempfile.mkstemp(
-                dir=dir_name, prefix=".ai_hud_conf_")
-            with os.fdopen(fd, "w") as f:
-                self._cp.write(f)
-            os.replace(tmp_path, self.path)
-            self._dirty = False
-        except OSError as e:
-            print(f"[config] WARNING: failed to save {self.path}: {e}")
-            # Try to clean up temp file
-            if tmp_path:
-                try:
-                    os.unlink(tmp_path)
-                except OSError:
-                    pass
+            dir_name = os.path.dirname(self.path) or "."
+            tmp_path = None
+            try:
+                os.makedirs(dir_name, exist_ok=True)
+                fd, tmp_path = tempfile.mkstemp(
+                    dir=dir_name, prefix=".ai_hud_conf_")
+                with os.fdopen(fd, "w") as f:
+                    self._cp.write(f)
+                os.replace(tmp_path, self.path)
+                self._dirty = False
+            except OSError as e:
+                print(f"[config] WARNING: failed to save {self.path}: {e}")
+                # Try to clean up temp file
+                if tmp_path:
+                    try:
+                        os.unlink(tmp_path)
+                    except OSError:
+                        pass
 
     def get_fusion_params(self):
         """Return dict of all fusion parameters for SpeedFusion constructor."""
@@ -168,14 +185,16 @@ class ConfigManager:
 
     def reset_section(self, section):
         """Reset all parameters in a section to defaults."""
-        for (sec, key), (_, default, _, _) in PARAM_DEFS.items():
-            if sec == section:
-                self.set(sec, key, default)
+        with self._lock:
+            for (sec, key), (_, default, _, _) in PARAM_DEFS.items():
+                if sec == section:
+                    self.set(sec, key, default)
 
     def reset_all(self):
         """Reset entire config to defaults."""
-        for (sec, key), (_, default, _, _) in PARAM_DEFS.items():
-            self.set(sec, key, default)
+        with self._lock:
+            for (sec, key), (_, default, _, _) in PARAM_DEFS.items():
+                self.set(sec, key, default)
 
     # -----------------------------------------------------------------------
     # Internal
