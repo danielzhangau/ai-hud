@@ -1,0 +1,53 @@
+#!/bin/sh
+# USB-link networking daemon for ai-hud (DHCP + mDNS on usb0).
+#
+# Runs after S99usb0config so that usb0 already has its static IP. The
+# Python daemon itself also waits up to 10s for usb0 to come up.
+#
+# Bound exclusively to usb0 via SO_BINDTODEVICE, so it cannot interfere
+# with eth0 or any other DHCP server on the network.
+
+DAEMON=/root/usb_netd.py
+PIDFILE=/var/run/usb_netd.pid
+LOGFILE=/var/log/usb_netd.log
+
+start() {
+    if [ ! -f "$DAEMON" ]; then
+        echo "[usb_netd] $DAEMON not found, skipping"
+        return 0
+    fi
+    # Kill any stale instance first.
+    pkill -f "$DAEMON" 2>/dev/null
+    rm -f "$PIDFILE"
+
+    # Clear stale .pyc (device has no RTC).
+    find /root -name 'usb_netd*.pyc' -delete 2>/dev/null
+
+    start-stop-daemon -S -b -m -p "$PIDFILE" \
+        -x /usr/bin/python3 -- -u "$DAEMON" >> "$LOGFILE" 2>&1
+    echo "[usb_netd] started"
+}
+
+stop() {
+    if [ -f "$PIDFILE" ]; then
+        _pid=$(cat "$PIDFILE" 2>/dev/null)
+        if [ -n "$_pid" ] && [ -d "/proc/$_pid" ]; then
+            kill -TERM "$_pid" 2>/dev/null
+            sleep 1
+            [ -d "/proc/$_pid" ] && kill -KILL "$_pid" 2>/dev/null
+        fi
+        rm -f "$PIDFILE"
+    fi
+    # Fallback by name in case PID file got out of sync.
+    pkill -f "$DAEMON" 2>/dev/null
+    echo "[usb_netd] stopped"
+}
+
+case "$1" in
+    start)   start ;;
+    stop)    stop ;;
+    restart) stop; sleep 1; start ;;
+    *) echo "Usage: $0 {start|stop|restart}"; exit 1 ;;
+esac
+
+exit 0

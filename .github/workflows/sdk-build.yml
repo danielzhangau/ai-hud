@@ -50,6 +50,22 @@ jobs:
         run: |
           git clone --depth 1 https://github.com/LuckfoxTECH/luckfox-pico.git
 
+      # ---- Patch kernel defconfig to enable USB CDC NCM gadget ----
+      # NCM lets macOS / Win10 1903+ / Linux recognize the device as a
+      # USB Ethernet adapter with zero driver install. Idempotent: re-running
+      # the workflow without losing this patch.
+      - name: Enable USB CDC NCM in kernel defconfig
+        working-directory: luckfox-pico
+        run: |
+          DEF=sysdrv/source/kernel/arch/arm/configs/luckfox_rv1106_linux_defconfig
+          if grep -q "^CONFIG_USB_CONFIGFS_NCM=" "$DEF"; then
+            echo "NCM already enabled in defconfig"
+          else
+            sed -i '/^CONFIG_USB_CONFIGFS_RNDIS=y/a CONFIG_USB_CONFIGFS_NCM=y' "$DEF"
+          fi
+          echo "--- USB CONFIGFS settings after patch ---"
+          grep "^CONFIG_USB_CONFIGFS" "$DEF"
+
       # ---- Build the SDK (RV1106G3 + Buildroot) ----
       - name: Build SDK
         working-directory: luckfox-pico
