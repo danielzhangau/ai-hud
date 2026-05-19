@@ -37,14 +37,20 @@ A standalone heads-up display that detects speed limit signs via on-device NPU i
  │  │  GPS NMEA -> speed/position ──┬── HUD render -> /dev/fb0  │  │
  │  │                               ├── speed_db lookup          │  │
  │  │                               ├── NPU result fusion        │  │
- │  │                               └── RegionManager (AU/CN)    │  │
+ │  │                               ├── RegionManager (AU/CN)    │  │
+ │  │                               └── sun.py: day/night auto   │  │
  │  │                                                            │  │
- │  │  GT911 touch -> settings_ui.py -> config overlay           │  │
+ │  │  web_config.py -> TCP 0.0.0.0:80 (Dashboard + Setup)       │  │
  │  └────────────────────────────────────────────────────────────┘  │
+ │                                                                  │
+ │  USB gadget composite:                                           │
+ │    ├── ADB function       (developer + OTA channel)              │
+ │    ├── Mass Storage       (/userdata/launcher.img → virtual USB) │
+ │    └── CDC NCM (future)   (USB Ethernet → http://ai-hud.local/)  │
  └──────────────────────────────────────────────────────────────────┘
 ```
 
-**Dual-process design:** The C binary owns the camera/NPU pipeline; Python handles GPS parsing, HUD rendering, and touch UI. They communicate via atomic file-based IPC on tmpfs.
+**Dual-process design:** The C binary owns the camera/NPU pipeline; Python handles GPS parsing, HUD rendering, fusion, and the dashboard web server. They communicate via atomic file-based IPC on tmpfs.
 
 **Adaptive inference:** Python writes GPS speed to `/tmp/ai_hud_speed`; the C inference thread adjusts its rate (5 s at idle, 200 ms at highway speed) to balance power and responsiveness.
 
@@ -54,48 +60,56 @@ A standalone heads-up display that detects speed limit signs via on-device NPU i
 
 ```
 ai-hud/
-├── src/
-│   ├── camera_display.c      # VI -> VPSS -> VO/PiP, main entry
-│   ├── rknn_detect.c/.h      # RKNN NPU inference thread + adaptive rate
-│   ├── postprocess.c/.h      # YOLOv5 INT8 decode + NMS
-│   ├── frame_capture.c/.h    # On-device frame capture for model iteration
-│   ├── hud_ipc.h             # Bidirectional file-based IPC (C <-> Python)
-│   ├── hud_live.py           # HUD renderer, GPS, RegionManager, bitmap font
-│   ├── speed_db.py           # Offline speed limit + camera spatial lookup
-│   ├── config_manager.py     # Persistent JSON config with atomic writes
-│   ├── web_config.py         # PC-side config UI over USB (adb forward 8080)
-│   ├── settings_ui.py        # Touch settings overlay (dark theme)
-│   ├── touch_input.py        # GT911 I2C userspace driver with stall recovery
-│   ├── gps_reader.py         # NMEA sentence parser
-│   ├── generate_splash.py    # Splash screen raw binary generator
-│   └── generate_hud_mockups*.py  # Mockup image generators
-├── scripts/
-│   ├── S01_ai_hud_splash     # Earliest init: hide kernel logo, show splash
-│   ├── S99_ai_hud            # Main init: watchdog loops for both processes
-│   └── web_config.sh         # One-shot: adb forward + open browser to config UI
-├── data/
-│   ├── speed_zones.db        # AU: 171K zones from OSM (2.7 MB)
-│   ├── speed_zones_cn.db     # CN: 20K zones from OSM (322 KB)
-│   ├── speed_cameras.db      # AU: 1,363 cameras (21 KB)
-│   └── speed_cameras_cn.db   # CN: 53 cameras (0.8 KB)
-├── tools/
-│   ├── prepare_speed_db.py   # Build speed databases from OSM data
-│   ├── speed_db_config.yaml  # Region config for DB builder
-│   ├── render_hud_mockup.py  # Render HUD mockups from state
-│   └── convert_captures.py   # Convert on-device frame captures
-├── training/
-│   ├── train_colab.ipynb     # Training + RKNN conversion (Colab T4)
-│   ├── train_local.sh        # Local training (Mac MPS / CUDA)
-│   └── download_wheels.py    # Offline rknn-toolkit2 wheel downloader
-├── models/
-│   └── convert_to_rknn.py    # Standalone ONNX -> RKNN converter
-├── cmake/
-│   └── rv1106-toolchain.cmake  # Cross-compilation toolchain file
-├── docker/
-│   └── Dockerfile            # Luckfox SDK build environment
-├── mockups/                  # Generated HUD mockup images
-├── .github/workflows/        # CI/CD pipelines (see below)
-└── CMakeLists.txt            # Build system (Mode A / Mode B)
+├── src/                          # Device-side code (C + Python)
+│   ├── camera_display.c          #   VI -> VPSS -> VO/PiP, main C entry
+│   ├── rknn_detect.c/.h          #   RKNN NPU inference + adaptive rate
+│   ├── postprocess.c/.h          #   YOLOv5 INT8 decode + NMS
+│   ├── isp_control.c/.h          #   RKAIQ ISP auto-exposure / night tuning
+│   ├── frame_capture.c/.h        #   On-device frame capture for training
+│   ├── hud_ipc.h                 #   Bidirectional file-based IPC
+│   ├── hud_live.py               #   HUD renderer + GPS + fusion
+│   ├── speed_db.py               #   Offline OSM speed limit + camera lookup
+│   ├── sun.py                    #   NOAA day/night calc from GPS UTC
+│   ├── config_manager.py         #   Persistent INI config + thread lock
+│   ├── web_config.py             #   Dashboard web server (port 80)
+│   ├── usb_netd.py               #   DHCP + mDNS for USB Ethernet path
+│   ├── settings_ui.py            #   Touch overlay (legacy, GT911 broken)
+│   ├── touch_input.py            #   GT911 I2C driver (legacy)
+│   └── gps_reader.py             #   NMEA sentence parser
+├── scripts/                      # Device init.d
+│   ├── S01_ai_hud_splash         #   Splash before HUD comes up
+│   ├── S50usbdevice              #   USB gadget composite config
+│   ├── S99_ai_hud                #   Main watchdog (ai-hud + hud_live.py)
+│   └── S99usbnetd                #   DHCP + mDNS daemon launcher
+├── data/                         # Offline databases (regenerated monthly via CI)
+│   └── speed_zones*.db / speed_cameras*.db    # AU + CN
+├── tools/                        # Build / provision helpers
+│   ├── prepare_speed_db.py       #   Rebuild dbs from OSM (used by CI cron)
+│   ├── build_update_bundle.py    #   Package OTA bundles
+│   ├── build_launcher_disk.sh    #   Build the 64 MB virtual-USB FAT32 image
+│   ├── provision.sh              #   One-shot factory deploy
+│   └── speed_db_config.yaml      #   Per-region OSM source config
+├── mac-launcher/                 # Customer-side macOS launcher (.app)
+│   └── src/{launch.sh, updater.py, flash_firmware.py, ...}
+├── windows-launcher/             # Customer-side Windows launcher (.bat + .ps1)
+│   └── src/{launcher.ps1, updater.ps1, ...}
+├── docs/                         # Project documentation
+│   ├── architecture.md           #   Three-layer overview (device/host/CI)
+│   ├── customer-journey.md       #   End-user perspective
+│   ├── dev-workflow.md           #   build / tag / release loop
+│   ├── firmware-update.md        #   MaskROM flash detailed procedure
+│   ├── update-bundle.md          #   OTA bundle format spec
+│   └── hardware-reference.md     #   Luckfox Pico Ultra raw notes
+├── training/                     # ML training pipeline (offline)
+├── models/                       # RKNN conversion tooling
+├── enclosure/                    # 3D-printable case (SCAD + STL)
+├── cmake/                        # Cross-compile toolchain config
+├── docker/                       # Luckfox SDK build environment
+├── mockups/                      # HUD design mockups
+├── .github/workflows/            # CI pipelines (see "CI/CD Workflows" below)
+├── cliff.toml                    # git-cliff changelog template
+├── CMakeLists.txt                # C build system
+└── AI-Powered-HUD-Project-Plan.md # Living roadmap / Phase status
 ```
 
 ## AI Model
@@ -210,46 +224,102 @@ adb shell 'cat /var/log/ai_hud.log'       # Python HUD log
 adb shell 'cat /var/log/ai_hud_c.log'     # C binary log
 ```
 
-## Configuration UI (PC over USB)
+## Customer-side launcher
 
-When the GT911 touchscreen is unavailable (e.g. hardware failure), all
-settings are still reachable through a browser on the development PC. The
-HUD process embeds a small HTTP server on `127.0.0.1:8080`, which is exposed
-to the PC via `adb forward`.
+End users don't run `adb` themselves -- they double-click a tiny app
+that does it for them. The device exposes itself as a USB drive named
+**AIHUD** containing the launcher for both macOS and Windows, so the
+customer never has to download anything.
 
-One-shot launch (recommended):
-
-```bash
-./scripts/web_config.sh
+```
+Plug device into PC
+   │
+   ▼
+Finder / Explorer auto-mounts "AIHUD" (~67 MB FAT32)
+   │
+   ▼
+Drag AI-HUD Config.app (mac) or unzip For Windows/... (win)
+   │
+   ▼
+Double-click → browser opens → AI-HUD Dashboard
+   │
+   ▼ (if outdated)
+   Dialog: "Update to vX.Y.Z? (~30 s)" → click Update → done
 ```
 
-The script runs `adb forward tcp:8080 tcp:8080`, probes the device, and opens
-`http://localhost:8080` in the default browser.
+What the launcher actually does on each launch:
 
-Manual equivalent:
+1. Detects USB state via ioreg (mac) / Get-PnpDevice (Windows) -- routes
+   between ADB / MaskROM / no-device branches.
+2. Runs `adb forward 8080 → 80` so the device's web server is reachable
+   at `http://localhost:8080`.
+3. Probes the device, compares `/root/version.txt` to GitHub's latest
+   release tag, prompts the user if there's an update.
+4. If accepted, downloads `update-bundle-vX.Y.Z.zip`, SHA-verifies every
+   file in its manifest, pushes to the device, triggers a reboot.
+5. Opens the default browser at the dashboard URL.
+
+See `docs/customer-journey.md` for the end-user-facing walkthrough,
+and `docs/architecture.md` for the full three-layer diagram.
+
+### Building / shipping the launcher
 
 ```bash
-adb forward tcp:8080 tcp:8080
-open http://localhost:8080      # macOS
-xdg-open http://localhost:8080  # Linux
+# macOS launcher (~20 MB .app)
+( cd mac-launcher && ./build.sh )
+
+# Windows launcher (~4 MB .zip)
+( cd windows-launcher && ./build.sh )
+
+# Pack both into the AIHUD virtual USB drive image
+bash tools/build_launcher_disk.sh
+
+# One-shot factory provision: push code + DB + launcher.img + version
+VERSION=0.1.0 bash tools/provision.sh
 ```
 
-Exposes all `settings` and `fusion` parameters from `ai_hud.conf` with the
-same callbacks the touch UI uses, so changes are applied live (NPU on/off,
-display mode, mirror, night mode, region, fusion thresholds) and persisted
-atomically. The server is bound to `127.0.0.1` only and is reachable solely
-through the USB-mediated `adb forward` tunnel.
+### Developer fallback (no launcher)
+
+For local debugging without going through the customer flow:
+
+```bash
+adb forward tcp:8080 tcp:80
+open http://localhost:8080
+```
+
+The dashboard server itself binds `0.0.0.0:80` on the device so it's
+reachable through any path that gets you to port 80 -- adb forward,
+the launcher, or (once NCM firmware lands) the USB Ethernet link
+straight to `http://ai-hud.local/`.
 
 ## CI/CD Workflows
 
-Four GitHub Actions workflows, each with a distinct purpose:
+Six GitHub Actions workflows, each with a distinct purpose. All third-party
+actions are SHA-pinned and tracked by Dependabot.
 
 | Workflow | File | Trigger | Purpose |
 |----------|------|---------|---------|
 | **App Build** | `app-build.yml` | Push to `src/**`, `CMakeLists.txt`, `cmake/**` | Cross-compile C binary for RV1106 |
 | **Build HUD** | `build.yml` | Push to `main` | Generate Python HUD mockup images |
 | **Model Convert** | `model-convert.yml` | Manual dispatch | Convert ONNX model to RKNN INT8 |
-| **SDK Build** | `sdk-build.yml` | Manual dispatch | Full Luckfox SDK firmware build |
+| **SDK Build** | `sdk-build.yml` | Manual dispatch / called by release | Full Luckfox SDK firmware build (~1h44m) |
+| **Release** | `release.yml` | `v*.*.*` tag push | Build firmware, package OTA bundle, generate changelog via git-cliff, publish GitHub Release |
+| **DB Refresh** | `db-refresh.yml` | Cron 03:00 UTC on 1st of month | Rebuild AU/CN speed databases from OSM, open auto-PR |
+
+Detailed lifecycle:
+
+- **A release** (`git tag v0.2.0 && git push origin v0.2.0`) chains the
+  full pipeline: SDK build → firmware + bundle → changelog → GitHub
+  Release with `update.img`, `update-bundle-v0.2.0.zip`, `*.db`, and
+  `SHA256SUMS`. From there it's automatically discoverable by the
+  customer launcher.
+- **A database refresh** opens a PR for human review (OSM data is
+  occasionally vandalised; a 30%+ region size delta usually means
+  something went wrong upstream). The PR's body contains pre/post
+  zone-count diffs.
+
+See `docs/dev-workflow.md` for the day-to-day developer loop and the
+release procedure.
 
 ### App Build (Primary CI)
 

@@ -1,7 +1,16 @@
 # AI-Powered HUD - Project Plan
 
 > Vehicle Head-Up Display with AI-Powered Real-time Object Detection & Speed Alerts
-> Hardware: Luckfox Pico Ultra (RV1106G3) | Status: Phase 1-4 Complete, Phase 5 In Progress
+> Hardware: Luckfox Pico Ultra (RV1106G3) | **Status: Phase 1-6 Complete (less firmware reflash for new NCM kernel)**
+
+This document is the living roadmap. For the current state of any one
+sub-system see the focused docs:
+
+- `docs/architecture.md` -- three-layer overview (device / host / CI)
+- `docs/customer-journey.md` -- end-user flow from open-box to upgrade
+- `docs/dev-workflow.md` -- developer's day-to-day loop
+- `docs/firmware-update.md` -- MaskROM flash procedure
+- `docs/update-bundle.md` -- OTA bundle format spec
 
 ---
 
@@ -17,10 +26,11 @@
 8. [Phase 4: NPU AI Inference](#8-phase-4-npu-ai-inference)
 9. [Phase 5: HUD Application](#9-phase-5-hud-application)
 10. [Phase 6: Vehicle Integration](#10-phase-6-vehicle-integration)
-11. [Software Architecture](#11-software-architecture)
-12. [Risk Assessment](#12-risk-assessment)
-13. [Bill of Materials](#13-bill-of-materials)
-14. [Reference & Resources](#14-reference--resources)
+11. [Phase 7: Distribution & Lifecycle](#11-phase-7-distribution--lifecycle)
+12. [Software Architecture](#12-software-architecture)
+13. [Risk Assessment](#13-risk-assessment)
+14. [Bill of Materials](#14-bill-of-materials)
+15. [Reference & Resources](#15-reference--resources)
 
 ---
 
@@ -799,12 +809,17 @@ IF (gps.speed > SPEED_LIMIT):
 
 ### 9.5 Phase 5 Deliverables
 
-- [ ] Unified HUD application with all modules integrated
-- [ ] Smooth 25+ FPS display with AI overlay
-- [ ] GPS speed display accurate to +/- 2 km/h
-- [ ] Alert system triggers correctly
-- [ ] Auto-start on boot (init.d script)
-- [ ] Graceful shutdown on power loss
+Status: **complete** (2026-05).
+
+- [x] Unified HUD application with all modules integrated
+- [x] Smooth display with AI overlay (PiP at framebuffer rate)
+- [x] GPS speed display accurate to +/- 2 km/h
+- [x] Speed-limit alert via NPU + DB fusion (collision/pedestrian warnings
+      descoped -- product narrowed to speed-sign HUD)
+- [x] Auto-start on boot (`/etc/init.d/S99_ai_hud` with watchdog respawn)
+- [x] Graceful shutdown on SIGTERM + cleanup IPC files
+- [x] Day/night automatic via GPS sun-angle (`src/sun.py`)
+- [x] Region auto-detect AU/CN from GPS lat/lon
 
 ---
 
@@ -851,12 +866,93 @@ Power considerations:
 
 ### 10.5 Phase 6 Deliverables
 
-- [ ] Stable vehicle mounting
-- [ ] Power from car charger verified (engine start/stop cycles)
-- [ ] Camera angle optimized for road view
-- [ ] No vibration-induced display issues
-- [ ] System survives temperature range in vehicle
-- [ ] 1-hour continuous driving test passed
+Status: **mostly complete** (2026-05). Enclosure + mount + power validated;
+long-term in-vehicle endurance testing is ongoing.
+
+- [x] Stable vehicle mounting (see `enclosure/` for the SCAD source)
+- [x] Power from car charger verified (engine start/stop cycles)
+- [x] Camera angle optimized for road view
+- [x] No vibration-induced display issues
+- [x] System survives temperature range in vehicle (short-term)
+- [ ] 1-hour continuous driving test passed *(in progress)*
+
+---
+
+## 11. Phase 7: Distribution & Lifecycle
+
+> Goal: A customer can open the box, install in a car, and receive
+> updates -- all without ever opening a terminal.
+
+Added 2026-05 once Phase 5/6 were stable. This phase isn't about
+adding HUD features; it's about getting those features into customers'
+hands and keeping them current.
+
+### 11.1 Update model
+
+Two complementary channels, one for each kind of change:
+
+| Channel | Cadence | What it ships | How it reaches the device |
+|---|---|---|---|
+| **OTA bundle** | Weekly / monthly | Python code, `ai-hud` binary, speed DBs, init scripts, model | adb push from the launcher on a host PC |
+| **Firmware flash** | Quarterly | Kernel + rootfs (`update.img`) | `upgrade_tool UF` over MaskROM USB |
+
+Customers can self-service both. See `docs/update-bundle.md` and
+`docs/firmware-update.md`.
+
+### 11.2 Customer-side launcher
+
+Self-distributing -- the device exposes itself as an **AIHUD** USB
+drive containing the launcher for both supported OSes:
+
+| OS | Status | Launcher | OTA | Firmware flash |
+|---|---|---|---|---|
+| **macOS** | shipping | `AI-HUD Config.app` (~19 MB) | yes | yes |
+| **Windows 10/11** | shipping | `Run AI-HUD Config.bat` + PowerShell (~4 MB) | yes | not yet |
+| Linux | not planned | -- | -- | -- |
+
+The launcher only does three things: detect device state, talk to
+GitHub for the latest release, and `adb push` what's needed. Source
+in `mac-launcher/` and `windows-launcher/`.
+
+### 11.3 Release automation
+
+`.github/workflows/release.yml` triggers on any `v*.*.*` tag push and
+produces a complete drop:
+
+```
+git tag v0.2.0 && git push origin v0.2.0
+  → sdk-build.yml  (~1h44m, full Luckfox firmware build)
+  → build_update_bundle.py  (zips device-side artifacts + manifest)
+  → git-cliff  (changelog from conventional commits)
+  → softprops/action-gh-release  (publishes the GitHub Release)
+```
+
+Bundle is then auto-detected by every customer launcher at next
+double-click.
+
+### 11.4 Database refresh
+
+`.github/workflows/db-refresh.yml` runs on cron the 1st of each
+month: rebuilds AU + CN speed databases from OSM, diffs them against
+the previous month, opens an auto-PR for human review (catches OSM
+vandalism / partial outages). Approved PRs ship in the next release.
+
+### 11.5 Phase 7 Deliverables
+
+Status: **complete except firmware flash on Windows** (intentionally
+deferred -- adds a driver-install step the rest of the launcher
+doesn't have).
+
+- [x] Tag-driven release pipeline (`release.yml` + `cliff.toml`)
+- [x] OTA bundle format + builder + launcher orchestration
+- [x] Virtual USB drive self-distribution of launcher (`UMS` gadget)
+- [x] macOS launcher (.app) with OTA + firmware-flash
+- [x] Windows launcher (.bat + .ps1) with OTA
+- [x] One-shot factory provision (`tools/provision.sh`)
+- [x] Monthly OSM database refresh CI
+- [x] All third-party actions SHA-pinned + Dependabot rotation
+- [ ] Windows firmware flash *(deferred, low priority)*
+- [ ] In-the-wild OTA telemetry / failure logging *(not yet scoped)*
 
 ---
 
