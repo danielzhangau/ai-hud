@@ -1,0 +1,85 @@
+name: Release
+
+# Triggered by pushing a version tag (e.g. `git tag v0.1.0 && git push origin v0.1.0`).
+# Builds the SDK via the reusable sdk-build workflow, generates a changelog
+# from conventional commits with git-cliff, then publishes a GitHub Release
+# carrying the firmware artifacts.
+on:
+  push:
+    tags:
+      - "v*.*.*"
+
+permissions:
+  # action-gh-release needs to create releases + upload assets.
+  contents: write
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # 1. Build firmware via the reusable sdk-build workflow
+  # ---------------------------------------------------------------------------
+  build:
+    uses: ./.github/workflows/sdk-build.yml
+    with:
+      version: ${{ github.ref_name }}
+
+  # ---------------------------------------------------------------------------
+  # 2. Generate changelog + publish GitHub Release with firmware attached
+  # ---------------------------------------------------------------------------
+  publish:
+    needs: build
+    runs-on: ubuntu-22.04
+    steps:
+      # Full history required so git-cliff can walk from the previous tag.
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # Generate the per-tag changelog body. --latest emits only the section
+      # for the newly pushed tag (everything between the prior tag and HEAD).
+      - name: Generate changelog
+        id: changelog
+        uses: orhun/git-cliff-action@v4
+        with:
+          config: cliff.toml
+          args: --latest --strip header
+        env:
+          OUTPUT: RELEASE_NOTES.md
+
+      # Pull the firmware images produced by the build job.
+      - name: Download firmware artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ needs.build.outputs.artifact-name }}
+          path: firmware
+
+      # Add SHA-256 checksums so users can verify downloads.
+      - name: Compute checksums
+        working-directory: firmware
+        run: |
+          for f in *.img *.bin 2>/dev/null; do
+            [ -f "$f" ] && sha256sum "$f" >> SHA256SUMS
+          done
+          echo "--- firmware bundle ---"
+          ls -la
+          echo "--- SHA256SUMS ---"
+          cat SHA256SUMS 2>/dev/null || echo "(no checksums)"
+
+      # Publish the GitHub Release. The action creates the release if missing
+      # or updates it (additive on assets) if the tag already has one.
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: "AI-HUD ${{ github.ref_name }}"
+          body_path: RELEASE_NOTES.md
+          # Prerelease for any 0.x or any tag containing a hyphen (e.g. v0.2.0-rc1).
+          # GitHub conveniently lets us pass a literal boolean expression here.
+          prerelease: ${{ startsWith(github.ref_name, 'v0.') || contains(github.ref_name, '-') }}
+          files: |
+            firmware/*.img
+            firmware/*.bin
+            firmware/SHA256SUMS
+          fail_on_unmatched_files: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

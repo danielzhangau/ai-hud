@@ -2,11 +2,26 @@ name: Luckfox SDK Build
 
 on:
   workflow_dispatch:
+  # Reusable: release.yml calls this with a version string so the produced
+  # artifact can be picked up and attached to the GitHub Release.
+  workflow_call:
+    inputs:
+      version:
+        description: "Version tag passed in by the caller (e.g. v0.1.0)"
+        required: false
+        type: string
+        default: ""
+    outputs:
+      artifact-name:
+        description: "Name of the uploaded firmware artifact"
+        value: ${{ jobs.build.outputs.artifact-name }}
 
 jobs:
   build:
     runs-on: ubuntu-22.04
     timeout-minutes: 120
+    outputs:
+      artifact-name: ${{ steps.set-artifact-name.outputs.name }}
 
     env:
       DEBIAN_FRONTEND: noninteractive
@@ -77,11 +92,21 @@ jobs:
           printf '5\n0\n0\n' | ./build.sh lunch
           ./build.sh
 
+      # ---- Compute artifact name (versioned when called from release.yml) ----
+      - name: Compute artifact name
+        id: set-artifact-name
+        run: |
+          if [ -n "${{ inputs.version }}" ]; then
+            echo "name=luckfox-firmware-${{ inputs.version }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "name=luckfox-firmware" >> "$GITHUB_OUTPUT"
+          fi
+
       # ---- Upload firmware artifacts ----
       - name: Upload firmware artifacts
         if: success()
         uses: actions/upload-artifact@v4
         with:
-          name: luckfox-firmware
+          name: ${{ steps.set-artifact-name.outputs.name }}
           path: luckfox-pico/output/image/
           retention-days: 7
