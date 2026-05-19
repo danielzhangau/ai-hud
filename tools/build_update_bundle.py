@@ -72,6 +72,12 @@ OPTIONAL_FILE_MAP = [
     ("build/ai-hud",                       "/root/ai-hud",                              "0755"),
     ("models/speed_signs_rv1106.rknn",     "/root/model/speed_signs_rv1106.rknn",       "0644"),
     ("mockups/splash_raw.bin",             "/root/splash_raw.bin",                      "0644"),
+    # The virtual USB-drive image. /userdata is on a persistent partition
+    # so a reboot keeps the previous one; we overwrite during OTA so the
+    # customer's "USB drive" always contains the latest launcher. The
+    # post_deploy reboot below also re-binds mass_storage to the fresh
+    # file, otherwise the host would still see the stale contents.
+    ("dist/launcher.img",                  "/userdata/launcher.img",                    "0644"),
 ]
 
 POST_DEPLOY = [
@@ -210,6 +216,9 @@ def _bundle_layout_path(src_rel):
     if src_rel.startswith("models/"):
         return os.path.join("models", os.path.basename(src_rel))
     if src_rel.startswith("mockups/"):
+        return os.path.join("assets", os.path.basename(src_rel))
+    if src_rel.startswith("dist/"):
+        # Anything in dist/ is a build artifact; flatten into assets/.
         return os.path.join("assets", os.path.basename(src_rel))
     return os.path.basename(src_rel)
 
