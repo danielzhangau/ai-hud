@@ -311,12 +311,26 @@ class QueryResult:
 # Fusion logic: state machine combining DB + NPU detection
 # ---------------------------------------------------------------------------
 
-# NPU must meet ALL of these to be considered:
-NPU_CONFIDENCE_MIN = 0.70       # minimum single-frame confidence (conservative)
-NPU_VOTE_REQUIRED = 3           # consecutive matching detections needed
-NPU_OVERRIDE_TIMEOUT = 15.0     # seconds before reverting to DB (shorter = safer)
-# When DB has no data, NPU threshold is slightly relaxed:
-NPU_CONFIDENCE_NO_DB = 0.60
+# NPU fusion thresholds. Tuned to minimize false positives because a
+# wrong limit displayed to the driver is worse than no detection (DB
+# fallback or default keep the driver legally safe).
+#
+# Reference: postprocess.h BOX_THRESH = 0.65 (training F1-optimal=0.664).
+# A box only reaches Python after passing BOX_THRESH, so any fusion
+# threshold below 0.65 has no effect -- before 2026-05-19 the no-DB
+# threshold was 0.60 and silently turned off the entire fusion guard
+# in regions where the GPS DB has no coverage.
+#
+# Trade-offs by region:
+#   * DB-covered (highway, AU/CN main roads): aggressive 0.80 -- if the
+#     NPU is rejected the DB value is used, which is correct by design.
+#   * No-DB (small roads, new construction): 0.75 -- NPU is the only
+#     source; over-tightening risks falling back to default_limit, which
+#     can be wrong.
+NPU_CONFIDENCE_MIN = 0.80       # minimum confidence when DB has data
+NPU_CONFIDENCE_NO_DB = 0.75     # minimum confidence when DB is silent
+NPU_VOTE_REQUIRED = 4           # ~4 GPS cycles at 1 Hz; still <= sign visibility window
+NPU_OVERRIDE_TIMEOUT = 20.0     # seconds before reverting to DB (longer = less flap)
 
 
 class SpeedFusion:

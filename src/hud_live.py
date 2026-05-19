@@ -473,9 +473,39 @@ def main():
     # --- Load persistent config ---
     config = None
     try:
-        from config_manager import ConfigManager
+        from config_manager import ConfigManager, PARAM_DEFS
         config = ConfigManager()
         print(f"Config: loaded from {config.path}")
+
+        # One-shot migration of pre-2026-05-19 fusion defaults. The original
+        # values let too many false positives through (most notably
+        # npu_confidence_no_db=0.60 < BOX_THRESH=0.65, so the fusion guard
+        # was a no-op in regions without GPS DB coverage). If the user has
+        # never overridden a param it'll still equal the OLD default; bump
+        # it to the new default. User-overridden values are left alone.
+        _OLD_FUSION_DEFAULTS = {
+            ("fusion", "npu_confidence_min"):   0.70,
+            ("fusion", "npu_confidence_no_db"): 0.60,
+            ("fusion", "npu_vote_required"):    3,
+            ("fusion", "npu_override_timeout"): 15.0,
+        }
+        migrated = []
+        for (section, key), old in _OLD_FUSION_DEFAULTS.items():
+            typ, new_default, _vmin, _vmax = PARAM_DEFS[(section, key)]
+            if typ is float:
+                cur = config.get_float(section, key)
+                stale = abs(cur - old) < 1e-6
+            else:
+                cur = config.get_int(section, key)
+                stale = cur == old
+            if stale and cur != new_default:
+                config.set(section, key, new_default)
+                migrated.append(f"{section}.{key}: {old}->{new_default}")
+        if migrated:
+            config.save()
+            print("[migrate] Retuned fusion defaults to reduce false positives:")
+            for line in migrated:
+                print(f"[migrate]   {line}")
     except Exception as e:
         print(f"Config: not available ({e}), using defaults")
 

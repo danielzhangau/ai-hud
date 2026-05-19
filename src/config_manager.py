@@ -29,10 +29,12 @@ PARAM_DEFS = {
     # they survive reboots and can be hand-edited via `adb shell vi
     # /root/ai_hud.conf` in the rare case a fleet-wide tweak is needed.
     # The web UI no longer surfaces these -- end users don't tune them.
-    ("fusion", "npu_confidence_min"):   (float, 0.70, 0.10, 1.00),
-    ("fusion", "npu_confidence_no_db"): (float, 0.60, 0.10, 1.00),
-    ("fusion", "npu_vote_required"):    (int,   3,    1,    10),
-    ("fusion", "npu_override_timeout"): (float, 15.0, 5.0,  120.0),
+    # 2026-05-19: defaults retuned to minimize false positives. See
+    # speed_db.NPU_CONFIDENCE_* comments for the rationale.
+    ("fusion", "npu_confidence_min"):   (float, 0.80, 0.10, 1.00),
+    ("fusion", "npu_confidence_no_db"): (float, 0.75, 0.10, 1.00),
+    ("fusion", "npu_vote_required"):    (int,   4,    1,    10),
+    ("fusion", "npu_override_timeout"): (float, 20.0, 5.0,  120.0),
     ("fusion", "camera_alert_radius"):  (int,   800,  100,  2000),
 
     # Settings (only what isn't decidable automatically):
