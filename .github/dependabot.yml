@@ -1,0 +1,18 @@
+# Auto-rotate GitHub Actions that we've SHA-pinned for supply-chain safety.
+# Without this file, pins would freeze forever and we'd miss CVE fixes.
+# Dependabot reads the human-readable comment (e.g. `# v4`) next to each SHA
+# and only opens a PR when there's a newer release of the action.
+version: 2
+updates:
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: "ci"
+      include: "scope"
+    labels:
+      - "dependencies"
+      - "ci"

@@ -13,6 +13,12 @@ permissions:
   # action-gh-release needs to create releases + upload assets.
   contents: write
 
+# Serialize releases for the same tag -- protects against accidental
+# double-pushes and race conditions on the artifact name.
+concurrency:
+  group: release-${{ github.ref_name }}
+  cancel-in-progress: false
+
 jobs:
   # ---------------------------------------------------------------------------
   # 1. Build firmware via the reusable sdk-build workflow
@@ -30,8 +36,10 @@ jobs:
     runs-on: ubuntu-22.04
     steps:
       # Full history required so git-cliff can walk from the previous tag.
+      # Actions are pinned to commit SHA (supply-chain hardening). Comments
+      # carry the human-readable tag so dependabot can still rotate them.
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
         with:
           fetch-depth: 0
 
@@ -39,7 +47,7 @@ jobs:
       # for the newly pushed tag (everything between the prior tag and HEAD).
       - name: Generate changelog
         id: changelog
-        uses: orhun/git-cliff-action@v4
+        uses: orhun/git-cliff-action@f50e11560dce63f7c33227798f90b924471a88b5  # v4
         with:
           config: cliff.toml
           args: --latest --strip header
@@ -48,7 +56,7 @@ jobs:
 
       # Pull the firmware images produced by the build job.
       - name: Download firmware artifact
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4
         with:
           name: ${{ needs.build.outputs.artifact-name }}
           path: firmware
@@ -57,18 +65,20 @@ jobs:
       - name: Compute checksums
         working-directory: firmware
         run: |
-          for f in *.img *.bin 2>/dev/null; do
-            [ -f "$f" ] && sha256sum "$f" >> SHA256SUMS
-          done
+          # `find` (not glob) so the loop is silent when an extension has zero
+          # matches; -print0 / -0 keeps spaces-in-names safe; redirect once.
+          find . -maxdepth 1 -type f \( -name "*.img" -o -name "*.bin" \) \
+            -print0 | xargs -0 -r sha256sum > SHA256SUMS
           echo "--- firmware bundle ---"
           ls -la
           echo "--- SHA256SUMS ---"
-          cat SHA256SUMS 2>/dev/null || echo "(no checksums)"
+          cat SHA256SUMS
+          test -s SHA256SUMS || { echo "ERROR: no firmware images found"; exit 1; }
 
       # Publish the GitHub Release. The action creates the release if missing
       # or updates it (additive on assets) if the tag already has one.
       - name: Publish GitHub Release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65  # v2
         with:
           tag_name: ${{ github.ref_name }}
           name: "AI-HUD ${{ github.ref_name }}"
@@ -78,8 +88,10 @@ jobs:
           prerelease: ${{ startsWith(github.ref_name, 'v0.') || contains(github.ref_name, '-') }}
           files: |
             firmware/*.img
-            firmware/*.bin
             firmware/SHA256SUMS
-          fail_on_unmatched_files: false
+          # Fail the workflow if firmware/*.img isn't present so we never
+          # ship an empty release. Falsey before because *.bin was optional;
+          # we now only require the mandatory .img and SHA256SUMS.
+          fail_on_unmatched_files: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
