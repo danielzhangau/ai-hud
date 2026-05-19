@@ -80,13 +80,19 @@ if command -v codesign >/dev/null 2>&1; then
     codesign --force --deep --sign - "$APP_DIR" 2>&1 | tail -3 || true
 fi
 
+# --- Build distributable zip ------------------------------------------------
+# Ships the .app together with the Chinese end-user instructions so the
+# recipient gets everything needed in one download.
+echo "==> Packaging distributable zip..."
+cp "$SCRIPT_DIR/HOW-TO-OPEN.md" "$DIST_DIR/HOW-TO-OPEN.md"
+DIST_ZIP="$DIST_DIR/AI-HUD Config.zip"
+rm -f "$DIST_ZIP"
+( cd "$DIST_DIR" && zip -ryq "AI-HUD Config.zip" "AI-HUD Config.app" "HOW-TO-OPEN.md" )
+
 echo
 echo "==> Done."
-echo "    Bundle:  $APP_DIR"
-echo "    Size:    $(du -sh "$APP_DIR" | awk '{print $1}')"
+echo "    Bundle:        $APP_DIR ($(du -sh "$APP_DIR" | awk '{print $1}'))"
+echo "    Distributable: $DIST_ZIP ($(du -sh "$DIST_ZIP" | awk '{print $1}'))"
 echo
-echo "Try it:  open '$APP_DIR'"
-echo
-echo "To distribute to others:"
-echo "  1. zip -r 'AI-HUD Config.app.zip' '$APP_DIR'"
-echo "  2. Recipient unzips, then right-click -> Open (one-time Gatekeeper bypass)"
+echo "Try locally:  open '$APP_DIR'"
+echo "To share:     send 'AI-HUD Config.zip' to the end user"
