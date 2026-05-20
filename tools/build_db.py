@@ -155,44 +155,73 @@ def _write_quarantine_report(quarantine: list, out_md: Path,
 def build_au(states: list[str], output_dir: Path,
              quarantine_dir: Path,
              include_osm: bool = True) -> tuple[Path, Path]:
-    """Run the full AU pipeline. Returns (zones_db_path, report_path)."""
-    all_segs = []
-    for code, factory in AU_FETCHERS:
-        if states and code not in states:
-            print(f"[build_db] skipping {code} (not in --states filter)")
-            continue
-        print(f"[build_db] === fetching {code} ===")
+    """Run the full AU pipeline. Returns (zones_db_path, report_path).
+
+    Processes one state at a time -- fetcher + matching OSM bbox +
+    cross_verify -- to keep peak memory bounded by the largest state's
+    working set rather than the sum of all states. The first global
+    accumulator (`all_segs`) blew past the GitHub-hosted 7 GB runner
+    on 2026-05-20 around 31M SpeedSegment instances (NSW + VIC + WA +
+    ACT + OSM-NSW + OSM-VIC + parsing OSM-QLD) -- runner self-cancels
+    once swap thrashing dominates. This per-state loop holds at most
+    one state's gov+OSM segments before they collapse into VerifiedRecords.
+    """
+    import gc
+
+    selected = [(code, factory) for code, factory in AU_FETCHERS
+                if not states or code in states]
+    if not selected:
+        print("[build_db] no fetchers selected -- nothing to do")
+        return Path(), Path()
+
+    all_verified: list = []
+    all_quarantine: list = []
+
+    for code, factory in selected:
+        print(f"[build_db] === processing {code} ===")
         try:
-            segs = factory().fetch()
+            state_segs = factory().fetch()
         except Exception as exc:  # pragma: no cover -- surface to operator
-            print(f"[build_db] ERROR: {code} fetch failed: {exc}", file=sys.stderr)
+            print(f"[build_db] ERROR: {code} fetch failed: {exc}",
+                  file=sys.stderr)
             print(f"[build_db] continuing without {code}; expect lower "
                   f"confidence in that region", file=sys.stderr)
             continue
-        print(f"[build_db]   -> {len(segs):,} segments from {code}")
-        all_segs.extend(segs)
+        print(f"[build_db]   -> {len(state_segs):,} gov segments from {code}")
 
-    if include_osm:
-        # Resolve OSM cross-check states. Defaults to whatever official
-        # fetchers ran in this build; if states filter excludes
-        # everything, the OSM fetcher is skipped entirely. Mapping
-        # uses uppercase to match OSM's bbox table.
-        osm_states = [s.upper() for s in
-                      (states or [c for c, _ in AU_FETCHERS])]
-        try:
-            osm_segs = au_osm.OSMAUFetcher(states=osm_states).fetch()
-            print(f"[build_db]   -> {len(osm_segs):,} segments from osm")
-            all_segs.extend(osm_segs)
-        except Exception as exc:  # pragma: no cover -- surface to operator
-            print(f"[build_db] WARNING: OSM fetch failed: {exc}; "
-                  f"verified records will cap at OFFICIAL_ONLY confidence",
-                  file=sys.stderr)
+        osm_segs: list = []
+        if include_osm:
+            try:
+                osm_segs = au_osm.OSMAUFetcher(
+                    states=[code.upper()]).fetch()
+                print(f"[build_db]   -> {len(osm_segs):,} OSM segments "
+                      f"for {code.upper()}")
+            except Exception as exc:  # pragma: no cover -- surface to op
+                print(f"[build_db] WARNING: OSM fetch for {code} failed: "
+                      f"{exc}; verified records cap at OFFICIAL_ONLY",
+                      file=sys.stderr)
 
-    print(f"[build_db] cross-verifying {len(all_segs):,} segments...")
-    verified, quarantine = cv.verify_segments(all_segs)
-    summary = cv.summarize(verified, quarantine)
-    print(f"[build_db] verified={len(verified):,} "
-          f"quarantine={len(quarantine):,}")
+        combined_count = len(state_segs) + len(osm_segs)
+        print(f"[build_db] cross-verifying {combined_count:,} segments "
+              f"for {code}...")
+        verified, quarantine = cv.verify_segments(state_segs + osm_segs)
+        print(f"[build_db]   -> verified={len(verified):,} "
+              f"quarantine={len(quarantine):,}")
+        all_verified.extend(verified)
+        all_quarantine.extend(quarantine)
+
+        # Drop the now-redundant per-state working set before the next
+        # iteration. The verified/quarantine records we kept are MUCH
+        # smaller than the raw segments (1 verified per ~30 m group),
+        # so the accumulator grows slowly while peak resets each state.
+        del state_segs, osm_segs, verified, quarantine
+        gc.collect()
+
+    summary = cv.summarize(all_verified, all_quarantine)
+    print(f"[build_db] TOTAL verified={len(all_verified):,} "
+          f"quarantine={len(all_quarantine):,}")
+    verified = all_verified
+    quarantine = all_quarantine
 
     output_dir.mkdir(parents=True, exist_ok=True)
     zones_path = output_dir / "speed_zones.db"

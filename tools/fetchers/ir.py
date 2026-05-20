@@ -25,13 +25,19 @@ ROAD_OTHER = 5
 BEARING_UNKNOWN = 0xFFFF
 
 
-@dataclass
+@dataclass(slots=True)
 class SpeedSegment:
     """A single sampled point on a posted-speed road segment.
 
     Multiple SpeedSegment records are emitted per upstream geometry --
     one for every ~30m along the LineString. This duplication is what
     makes the on-device grid index O(1) lookups possible.
+
+    slots=True drops the per-instance __dict__ (~56 bytes saved per
+    object). build_au accumulates tens of millions of these -- the
+    saving across 30M instances is ~1.6 GB, which is the difference
+    between fitting in the 7 GB GitHub runner and being OOM-killed
+    halfway through OSM cross-verify.
     """
 
     lat: float
