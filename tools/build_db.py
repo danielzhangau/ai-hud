@@ -65,6 +65,17 @@ AU_FETCHERS = [
     ("qld", au_qld.QLDFetcher),
     ("wa",  au_wa.WAFetcher),
     ("act", au_act.ACTFetcher),
+    # OSM-only states/territories. au_unavailable.py documents these
+    # have no open government speed-limit dataset; falling back to OSM
+    # ensures at least *some* coverage instead of NO-DATA (which makes
+    # the device fall back to default_limit, often unsafe). Cross-verify
+    # will classify these as SINGLE_SOURCE -> UI shows "--" per the
+    # "宁可不报" policy, but the DB hit still beats a wrong default.
+    # Before this entry was added, querying Adelaide / Darwin / Hobart
+    # returned NO-DATA even though OSM had street-level data.
+    ("sa",  None),
+    ("nt",  None),
+    ("tas", None),
 ]
 
 # OSM is its own (multi-state) fetcher run alongside the state ones.
@@ -179,15 +190,22 @@ def build_au(states: list[str], output_dir: Path,
 
     for code, factory in selected:
         print(f"[build_db] === processing {code} ===")
-        try:
-            state_segs = factory().fetch()
-        except Exception as exc:  # pragma: no cover -- surface to operator
-            print(f"[build_db] ERROR: {code} fetch failed: {exc}",
-                  file=sys.stderr)
-            print(f"[build_db] continuing without {code}; expect lower "
-                  f"confidence in that region", file=sys.stderr)
-            continue
-        print(f"[build_db]   -> {len(state_segs):,} gov segments from {code}")
+        state_segs: list = []
+        if factory is None:
+            # OSM-only state (sa/nt/tas) -- skip the gov-source step
+            # entirely; OSM is the sole producer for this iteration.
+            print(f"[build_db]   (no gov fetcher; OSM-only state)")
+        else:
+            try:
+                state_segs = factory().fetch()
+            except Exception as exc:  # pragma: no cover -- surface to op
+                print(f"[build_db] ERROR: {code} fetch failed: {exc}",
+                      file=sys.stderr)
+                print(f"[build_db] continuing without {code}; expect "
+                      f"lower confidence in that region", file=sys.stderr)
+                continue
+            print(f"[build_db]   -> {len(state_segs):,} gov segments "
+                  f"from {code}")
 
         osm_segs: list = []
         if include_osm:
