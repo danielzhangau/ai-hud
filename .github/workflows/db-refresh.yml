@@ -80,12 +80,19 @@ jobs:
           # to each .db. Must match the secret baked into rootfs at
           # /etc/ai_hud_db_secret -- key rotation requires both.
           AI_HUD_DB_SECRET: ${{ secrets.AI_HUD_DB_SECRET }}
-        run: python3 tools/build_db.py --region au
+          # Force unbuffered stdout so we see per-fetcher progress in
+          # the CI log live. Without this, build_db's print() output
+          # only flushes on process exit -- if the job is cancelled or
+          # OOM-killed mid-run we get zero visibility into where it
+          # got stuck. Lost ~15 minutes on this in the first attempt.
+          PYTHONUNBUFFERED: "1"
+        run: python3 -u tools/build_db.py --region au
 
       - name: Rebuild CN databases (legacy OSM-only)
         env:
           AI_HUD_DB_SECRET: ${{ secrets.AI_HUD_DB_SECRET }}
-        run: python3 tools/prepare_speed_db.py --region cn
+          PYTHONUNBUFFERED: "1"
+        run: python3 -u tools/prepare_speed_db.py --region cn
 
       - name: Compute diff stats
         id: diff
