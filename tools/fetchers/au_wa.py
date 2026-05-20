@@ -76,7 +76,7 @@ class WAFetcher(SourceFetcher):
     name = "AU_WA_GOV"
     state = "WA"
 
-    def __init__(self, sample_interval_m: float = 80.0):
+    def __init__(self, sample_interval_m: float = 100.0):
         self.interval = sample_interval_m
 
     def fetch(self, limit: int | None = None,
@@ -170,7 +170,7 @@ def _main():
                     help="Early-stop after roughly N segments (smoke testing)")
     ap.add_argument("--no-archive", action="store_true",
                     help="Skip the gzip snapshot under data/raw/")
-    ap.add_argument("--interval", type=float, default=80.0,
+    ap.add_argument("--interval", type=float, default=100.0,
                     help="LineString sample interval in metres (default 30)")
     args = ap.parse_args()
 

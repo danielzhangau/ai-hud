@@ -64,7 +64,7 @@ class ACTFetcher(SourceFetcher):
     name = "AU_ACT_GOV"
     state = "ACT"
 
-    def __init__(self, sample_interval_m: float = 80.0):
+    def __init__(self, sample_interval_m: float = 100.0):
         self.interval = sample_interval_m
 
     def fetch(self, limit: int | None = None,
@@ -146,7 +146,7 @@ def _main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--limit", type=int, default=None)
     ap.add_argument("--no-archive", action="store_true")
-    ap.add_argument("--interval", type=float, default=80.0)
+    ap.add_argument("--interval", type=float, default=100.0)
     args = ap.parse_args()
     fetcher = ACTFetcher(sample_interval_m=args.interval)
     segs = fetcher.fetch(limit=args.limit, archive=not args.no_archive)
