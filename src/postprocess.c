@@ -22,7 +22,6 @@
 #include "postprocess.h"
 #include "utils.h"
 
-#include <math.h>
 #include <string.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -110,32 +109,22 @@ static inline float deqnt_affine_to_f32(int8_t qnt, int32_t zp, float scale) {
 }
 
 /* --------------------------------------------------------------------------
- * Activation functions
+ * Quantization threshold helper
  *
- * For INT8 quantized output, we compute sigmoid on the dequantized float.
- * We also provide an "unsigmoid" to convert a float threshold back to
- * the logit domain, so we can filter in quantized space for speed.
+ * airockchip yolov5 --rknpu bakes torch.sigmoid into every Detect head
+ * (models/yolo.py: `z.append(torch.sigmoid(self.m[i](x[i])))`), so RKNN
+ * outputs land in [0,1] already -- not raw logits. RV1106 quantizes those
+ * with zp=-128, scale=1/255, the exact mapping of [0,1] onto INT8
+ * [-128,127]. Post-process therefore skips sigmoid entirely and treats
+ * dequantized values as final probabilities; the threshold check below is
+ * the plain affine inverse of the quantization formula.
  * -------------------------------------------------------------------------- */
 
-/*
- * Convert a float probability threshold directly to the INT8 quantized domain.
- *
- * The airockchip yolov5 fork bakes sigmoid into every Detect head when
- * exporting with --rknpu (models/yolo.py: `z.append(torch.sigmoid(self.m[i]
- * (x[i])))`), so RKNN outputs are already in [0,1] probability space, NOT
- * raw logits. That matches the observed RV1106 quantization params zp=-128,
- * scale=1/255 (which maps [0,1] -> INT8 [-128,127]).
- *
- * Consequence: post_process must NOT apply sigmoid again. Dequantized values
- * are the final probabilities. Threshold check becomes a plain affine
- * inversion of the quantization formula.
- */
 static inline int8_t qnt_threshold(float threshold, int32_t zp, float scale) {
     float qnt_f = threshold / scale + (float)zp;
-    /* Clamp to int8 range */
-    if (qnt_f > 127.0f) return 127;
-    if (qnt_f < -128.0f) return -128;
-    return (int8_t)(qnt_f + 0.5f);
+    /* Round before clamp so a boundary value (e.g. 126.6) does not round
+     * up to 128 after clamping at 127. */
+    return (int8_t)(CLAMP(qnt_f + 0.5f, -128.0f, 127.0f));
 }
 
 /* --------------------------------------------------------------------------
@@ -336,11 +325,8 @@ static int process_head(int8_t *input, const int *anchor, int grid_h, int grid_w
                         raw_detection_t *out, int max_out) {
     int count = 0;
 
-    /*
-     * Pre-compute quantized threshold for objectness.
-     * If the INT8 value is below this, sigmoid(deqnt(val)) < conf_threshold,
-     * so we can skip without full dequantization.
-     */
+    /* Reject anchors whose quantized objectness already falls below the
+     * threshold -- avoids float dequant work for the vast majority of cells. */
     int8_t qnt_obj_thresh = qnt_threshold(conf_threshold, zp, scale);
 
     int channel_size = NUM_ANCHORS * PROP_BOX_SIZE;
@@ -357,12 +343,9 @@ static int process_head(int8_t *input, const int *anchor, int grid_h, int grid_w
                 if (obj_qnt < qnt_obj_thresh)
                     continue;
 
-                /*
-                 * Find best class in INT8 quantized space first.
-                 * Since dequant is monotonic (scale > 0) and sigmoid is monotonic,
-                 * the largest int8_t value maps to the highest class probability.
-                 * This avoids OBJ_CLASS_NUM sigmoid calls (each using expf).
-                 */
+                /* Find best class in INT8 quantized space; dequant is
+                 * monotonic so the largest int8 value wins outright -- no
+                 * need to dequantize every class candidate. */
                 int best_cls = 0;
                 int8_t best_cls_qnt = input[offset + 5];
                 for (int c = 1; c < OBJ_CLASS_NUM; c++) {
@@ -373,22 +356,11 @@ static int process_head(int8_t *input, const int *anchor, int grid_h, int grid_w
                     }
                 }
 
-                /*
-                 * Combined quantized-space threshold check.
-                 * Both obj_qnt and best_cls_qnt must be above the objectness
-                 * threshold to have any chance of passing after sigmoid multiply.
-                 * This is conservative: conf_threshold for each factor individually
-                 * is a necessary (not sufficient) condition for
-                 * sigmoid(obj) * sigmoid(cls) >= conf_threshold.
-                 * Rejects the vast majority of candidates with zero sigmoid calls.
-                 */
+                /* Both factors of final_score = obj * cls must individually
+                 * clear the threshold (necessary condition for product). */
                 if (best_cls_qnt < qnt_obj_thresh)
                     continue;
 
-                /*
-                 * Dequantize objectness directly -- NO sigmoid.
-                 * RKNN outputs (airockchip --rknpu) are already sigmoid'd.
-                 */
                 float obj_conf = deqnt_affine_to_f32(obj_qnt, zp, scale);
                 if (obj_conf < conf_threshold)
                     continue;
@@ -403,12 +375,9 @@ static int process_head(int8_t *input, const int *anchor, int grid_h, int grid_w
                 if (count >= max_out)
                     return count;
 
-                /*
-                 * Decode bounding box. Because tx/ty/tw/th are already
-                 * sigmoid'd by the exported model, the YOLOv5 anchor decode
-                 * collapses from `(sigmoid(t)*2 - 0.5 + grid)*stride` to
-                 * `(t*2 - 0.5 + grid)*stride`. Same shape, no double sigmoid.
-                 */
+                /* YOLOv5 anchor decode: bx = (t*2 - 0.5 + grid)*stride,
+                 * bw = (t*2)^2 * anchor.  No sigmoid here -- see header note
+                 * on qnt_threshold. */
                 float tx = deqnt_affine_to_f32(input[offset + 0], zp, scale);
                 float ty = deqnt_affine_to_f32(input[offset + 1], zp, scale);
                 float tw = deqnt_affine_to_f32(input[offset + 2], zp, scale);
@@ -416,10 +385,9 @@ static int process_head(int8_t *input, const int *anchor, int grid_h, int grid_w
 
                 float bx = (tx * 2.0f - 0.5f + (float)x) * (float)stride;
                 float by = (ty * 2.0f - 0.5f + (float)y) * (float)stride;
-                float bw_half = (tw * 2.0f);
-                bw_half = bw_half * bw_half * (float)anchor[a * 2 + 0] * 0.5f;
-                float bh_half = (th * 2.0f);
-                bh_half = bh_half * bh_half * (float)anchor[a * 2 + 1] * 0.5f;
+                /* bw_half = (tw*2)^2 * anchor / 2 = 2*tw^2*anchor */
+                float bw_half = 2.0f * tw * tw * (float)anchor[a * 2 + 0];
+                float bh_half = 2.0f * th * th * (float)anchor[a * 2 + 1];
 
                 out[count].x1 = bx - bw_half;
                 out[count].y1 = by - bh_half;
