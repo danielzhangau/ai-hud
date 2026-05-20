@@ -91,7 +91,12 @@ function Get-RockchipState {
             $pids += [Convert]::ToInt32($Matches[1], 16)
         }
     }
-    if ($pids -contains 0x110b) { return "maskrom" }
+    # MaskROM PID varies by Rockchip SoC generation. RV1106 (our target)
+    # uses 0x110c, earlier RK chips report 0x110b. Accept both. Loader
+    # stage (post-MaskROM, pre-Linux) is 0x110a across generations.
+    # Confirmed on hardware 2026-05-19: RV1106 in MaskROM enumerates as
+    # VID_2207&PID_110C with no manufacturer/product strings.
+    if (($pids -contains 0x110b) -or ($pids -contains 0x110c)) { return "maskrom" }
     if ($pids -contains 0x110a) { return "loader"  }
     if ($pids -contains 0x0019) { return "adb"     }
     if ($pids) { return "unknown:$($pids[0])" }

@@ -31,8 +31,12 @@ GITHUB_API = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
 
 ROCKCHIP_VID = 8711           # 0x2207
 PID_ADB     = 25              # 0x0019 -- normal Linux/ADB mode
-PID_LOADER  = 4362            # 0x110a -- after rkdeveloptool / between maskrom and Linux
-PID_MASKROM = 4363            # 0x110b -- BOOT-button-held mode, ready to flash
+# MaskROM and Loader appear under slightly different PIDs depending on
+# the Rockchip SoC generation. RV1106 specifically uses 0x110c for
+# MaskROM (confirmed on hardware 2026-05-19). Earlier docs sometimes
+# show 0x110b which is RK29-era. We accept both ranges as flash-mode.
+PIDS_LOADER  = (4362,)               # 0x110a
+PIDS_MASKROM = (4363, 4364)          # 0x110b, 0x110c
 
 CACHE_DIR = os.path.expanduser("~/Library/Caches/AI-HUD")
 
@@ -70,10 +74,15 @@ def confirm(msg, default_button="Flash"):
 def detect_rockchip_state():
     """Return one of: 'adb', 'maskrom', 'loader', 'none', 'unknown:<pid>'.
 
-    Walks `ioreg -p IOUSB -l` and pulls idProduct out of every USB device
-    advertising the Rockchip vendor string. If several Rockchip devices
-    are attached at once, we pick the most "we should flash this" state:
-    MaskROM beats Loader beats ADB.
+    Walks `ioreg -p IOUSB -l` and looks for any USB device whose idVendor
+    field matches Rockchip (0x2207). We match the numeric VID rather than
+    the "rockchip" vendor-name string because MaskROM-mode devices ship
+    string descriptors all zero -- only the numeric VID/PID survive.
+    Confirmed 2026-05-19 on RV1106 in MaskROM: iManufacturer=0, iProduct=0,
+    no "kUSBVendorString" field exists, but idVendor=8711 is still there.
+
+    If several Rockchip devices are attached at once we pick the most
+    "we should flash this" state: MaskROM beats Loader beats ADB.
     """
     try:
         out = subprocess.run(
@@ -83,27 +92,38 @@ def detect_rockchip_state():
     except (FileNotFoundError, subprocess.TimeoutExpired):
         return "none"
 
+    # Walk each IOUSBHostDevice block looking for our VID. ioreg formats
+    # one device per `+-o IOUSBHostDevice@...` block; idVendor/idProduct
+    # appear inside. We don't assume any specific ordering of fields
+    # within a block, so we collect them and only emit a (vid, pid) pair
+    # when we leave the block.
     products = []
-    in_rk = False
+    cur_vid = None
+    cur_pid = None
     for line in out.splitlines():
-        # Mark the start of a Rockchip device block. ioreg lists a few
-        # different vendor-name keys for the same device; checking any
-        # of them works.
-        if ('"USB Vendor Name" = "rockchip"' in line
-                or '"kUSBVendorString" = "rockchip"' in line):
-            in_rk = True
+        if "IOUSBHostDevice" in line and "+-o" in line:
+            # New device block -- flush previous
+            if cur_vid == ROCKCHIP_VID and cur_pid is not None:
+                products.append(cur_pid)
+            cur_vid = None
+            cur_pid = None
             continue
-        if in_rk and '"idProduct"' in line:
-            m = re.search(r"(\d+)\s*$", line)
-            if m:
-                products.append(int(m.group(1)))
-            in_rk = False
+        m = re.search(r'"idVendor"\s*=\s*(\d+)', line)
+        if m:
+            cur_vid = int(m.group(1))
+            continue
+        m = re.search(r'"idProduct"\s*=\s*(\d+)', line)
+        if m:
+            cur_pid = int(m.group(1))
+    # Final flush at EOF
+    if cur_vid == ROCKCHIP_VID and cur_pid is not None:
+        products.append(cur_pid)
 
     if not products:
         return "none"
-    if PID_MASKROM in products:
+    if any(p in PIDS_MASKROM for p in products):
         return "maskrom"
-    if PID_LOADER in products:
+    if any(p in PIDS_LOADER for p in products):
         return "loader"
     if PID_ADB in products:
         return "adb"
