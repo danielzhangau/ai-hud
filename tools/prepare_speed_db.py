@@ -40,11 +40,16 @@ except ImportError:
     print("ERROR: PyYAML is required. Install with: pip install pyyaml")
     sys.exit(1)
 
-# db_signer lives in src/ -- one source of truth for signing logic
-# shared with both the device-side loader and the new build_db.py.
-# Import once at module load so _sign_artifact() doesn't mutate
-# sys.path on every call.
+# Make src/ + repo root importable. We need both because:
+#   - src/  for db_signer (the on-device signing module we reuse to
+#           keep CN .db files signed too).
+#   - root/ for `from tools.fetchers._geometry import ...` further
+#           down -- without it `python3 tools/prepare_speed_db.py`
+#           fails with `ModuleNotFoundError: No module named 'tools'`
+#           because Python prepends the SCRIPT's dir to sys.path, not
+#           the repo root.
 _REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, _REPO_ROOT)
 sys.path.insert(0, os.path.join(_REPO_ROOT, "src"))
 try:
     import db_signer as _signer
