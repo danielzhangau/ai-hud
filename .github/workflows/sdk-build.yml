@@ -87,9 +87,56 @@ jobs:
           echo "--- USB CONFIGFS settings after patch ---"
           grep "^CONFIG_USB_CONFIGFS" "$DEF"
 
+      # ---- Register the rootfs post-build hook ----
+      # Drops scripts/buildroot_post_build.sh into Buildroot's
+      # BR2_ROOTFS_POST_BUILD_SCRIPT slot so /etc/ai_hud_db_secret
+      # lands in the image. Grep the active defconfig instead of
+      # hard-coding the path -- the Luckfox SDK has shuffled
+      # defconfig locations across releases.
+      - name: Register Buildroot post-build hook
+        run: |
+          set -eu
+          HOOK_SRC="$GITHUB_WORKSPACE/scripts/buildroot_post_build.sh"
+          chmod +x "$HOOK_SRC"
+
+          DEFCONFIGS=$(find luckfox-pico/sysdrv/source/buildroot/buildroot/configs \
+                            -maxdepth 1 -name 'luckfox*_defconfig')
+          N=$(echo "$DEFCONFIGS" | grep -c .)
+          if [ "$N" -eq 0 ]; then
+              echo "::error::No luckfox*_defconfig found under buildroot/configs"
+              ls luckfox-pico/sysdrv/source/buildroot/buildroot/configs/ || true
+              exit 1
+          elif [ "$N" -gt 1 ]; then
+              # Ambiguity is dangerous -- patching the wrong defconfig
+              # ships an image without the secret and the device
+              # rejects every signed DB silently. Force the operator
+              # to pin a single defconfig instead of guessing.
+              echo "::error::ambiguous defconfig (found $N matches):"
+              echo "$DEFCONFIGS"
+              exit 1
+          fi
+          DEFCONFIG="$DEFCONFIGS"
+          echo "Patching $DEFCONFIG"
+
+          # Idempotent: replace any existing setting; append if absent.
+          # Absolute path so Buildroot finds the script regardless of
+          # which CWD it execs from internally.
+          if grep -q "^BR2_ROOTFS_POST_BUILD_SCRIPT" "$DEFCONFIG"; then
+              sed -i "s|^BR2_ROOTFS_POST_BUILD_SCRIPT=.*|BR2_ROOTFS_POST_BUILD_SCRIPT=\"$HOOK_SRC\"|" "$DEFCONFIG"
+          else
+              echo "BR2_ROOTFS_POST_BUILD_SCRIPT=\"$HOOK_SRC\"" >> "$DEFCONFIG"
+          fi
+          echo "--- Post-build hook entry ---"
+          grep "^BR2_ROOTFS_POST_BUILD_SCRIPT" "$DEFCONFIG"
+
       # ---- Build the SDK (RV1106G3 + Buildroot) ----
       - name: Build SDK
         working-directory: luckfox-pico
+        env:
+          # Buildroot passes its full environment to post-build scripts,
+          # so this single env var reaches scripts/buildroot_post_build.sh
+          # which writes /etc/ai_hud_db_secret into the rootfs.
+          AI_HUD_DB_SECRET: ${{ secrets.AI_HUD_DB_SECRET }}
         run: |
           export LANG=en_US.UTF-8
           export LC_ALL=en_US.UTF-8
@@ -97,6 +144,15 @@ jobs:
           # Non-interactive lunch: "5" = Pico Ultra, "0" = EMMC, "0" = Buildroot
           printf '5\n0\n0\n' | ./build.sh lunch
           ./build.sh
+          # Sanity check -- the post-build hook should have left a
+          # 0600 secret file in the staged rootfs. If this is missing
+          # the firmware will boot but every signed DB will be rejected.
+          STAGED=$(find . -path "*/buildroot/output/target/etc/ai_hud_db_secret" | head -1)
+          if [ -z "$STAGED" ]; then
+              echo "::error::/etc/ai_hud_db_secret missing in staged rootfs"
+              exit 1
+          fi
+          echo "Secret staged: $STAGED ($(stat -c%a "$STAGED"), $(wc -c <"$STAGED") bytes)"
 
       # ---- Compute artifact name (versioned when called from release.yml) ----
       - name: Compute artifact name

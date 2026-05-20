@@ -64,6 +64,8 @@ jobs:
       # Stage the speed databases alongside firmware so a single release
       # bundles everything an operator needs to bring a device up to a
       # known-good state without re-running the full SDK build locally.
+      # The *.sig sidecars must travel with their .db counterparts --
+      # the device loader rejects unsigned DBs (fail-closed).
       - name: Stage speed databases
         run: |
           mkdir -p firmware/data
@@ -71,7 +73,23 @@ jobs:
           cp data/speed_cameras.db  firmware/data/ 2>/dev/null || true
           cp data/speed_zones_cn.db firmware/data/ 2>/dev/null || true
           cp data/speed_cameras_cn.db firmware/data/ 2>/dev/null || true
+          cp data/speed_zones.db.sig     firmware/data/ 2>/dev/null || true
+          cp data/speed_cameras.db.sig   firmware/data/ 2>/dev/null || true
+          cp data/speed_zones_cn.db.sig  firmware/data/ 2>/dev/null || true
+          cp data/speed_cameras_cn.db.sig firmware/data/ 2>/dev/null || true
           ls -la firmware/data/ || true
+          # Defense-in-depth: refuse to publish a release whose .db
+          # files lack signatures. A missing .sig in production is
+          # always either a build bug or a tampered checkout -- we'd
+          # rather fail the release than ship something the device
+          # will reject silently after install.
+          for db in firmware/data/*.db; do
+              [ -f "$db" ] || continue
+              if [ ! -f "$db.sig" ]; then
+                  echo "::error::Missing signature: $db.sig"
+                  exit 1
+              fi
+          done
 
       # Build the OTA update bundle that the macOS launcher pulls down
       # to push code/db updates to devices already in the field. Skips
@@ -81,6 +99,13 @@ jobs:
       # by an OTA bundle). Skips the .rknn model for the same reason it
       # ships inside the rootfs.
       - name: Build update bundle
+        env:
+          # HMAC secret used by db_signer to sign .db sidecars during
+          # build. Mirrors the value baked into the rootfs at
+          # /etc/ai_hud_db_secret -- key rotation requires updating
+          # both. Stored as a GitHub Actions secret to keep it out of
+          # the public source tree.
+          AI_HUD_DB_SECRET: ${{ secrets.AI_HUD_DB_SECRET }}
         run: |
           VERSION="${{ github.ref_name }}"
           VERSION="${VERSION#v}"
@@ -131,6 +156,7 @@ jobs:
           files: |
             firmware/*.img
             firmware/data/*.db
+            firmware/data/*.db.sig
             firmware/update-bundle*.zip
             firmware/update-bundle*.sha256
             firmware/SHA256SUMS

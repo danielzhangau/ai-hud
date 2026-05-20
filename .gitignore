@@ -41,3 +41,10 @@ enclosure/*.step
 # Empty dirs
 sysroot/
 dist/
+
+# Raw speed-DB source snapshots (per-fetcher, gz-compressed).
+# Re-downloadable from upstream; never commit to keep repo lean.
+data/raw/
+
+# Diagnostic / scratch CMake build trees
+build-diag/
