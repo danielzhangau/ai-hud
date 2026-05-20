@@ -150,7 +150,14 @@ class QLDFetcher(SourceFetcher):
             all_raw.extend(page)
 
             for rec in page:
-                speed_str = (rec.get("SPEED") or "").strip()
+                # SPEED is text in the CKAN schema but the datastore
+                # returns ints for rows like SPEED=60 (some LGAs encode
+                # the numeric value typed, others as strings). Coerce
+                # to str before the regex to handle both shapes; first
+                # surfaced as an AttributeError on Winton LGA in CI on
+                # 2026-05-20.
+                raw_speed = rec.get("SPEED")
+                speed_str = "" if raw_speed is None else str(raw_speed).strip()
                 m = SPEED_RE.match(speed_str)
                 if not m:
                     skipped_speed += 1

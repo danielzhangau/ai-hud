@@ -47,14 +47,22 @@ jobs:
         # The matrix lets one bad fetcher fail without taking down the
         # others -- you see the full picture in one job run.
         include:
-          - { name: nsw, module: au_nsw, min: 1500000, max: 5000000, limit: "" }
-          - { name: wa,  module: au_wa,  min: 100000,  max: 500000,  limit: "" }
-          - { name: vic, module: au_vic, min: 2000000, max: 8000000, limit: "" }
-          - { name: act, module: au_act, min: 10000,   max: 100000,  limit: "" }
+          # Baselines captured from the first live CI run, 2026-05-20.
+          # Band is roughly [actual * 0.6, actual * 1.6] -- normal
+          # upstream growth/shrink slips through but schema-break
+          # symptoms (silent zero, 10x rows) still trip the gate.
+          # Update alongside any deliberate change to fetcher filtering.
+          #
+          # 2026-05-20 actuals: nsw=6,519,283  vic=15,744,096
+          #                     wa=1,082,412   act=150,296
+          - { name: nsw, module: au_nsw, min: 4000000,  max: 10000000, limit: "" }
+          - { name: wa,  module: au_wa,  min: 600000,   max: 2000000,  limit: "" }
+          - { name: vic, module: au_vic, min: 10000000, max: 25000000, limit: "" }
+          - { name: act, module: au_act, min: 80000,    max: 250000,   limit: "" }
           # QLD pulls 64 LGAs via CKAN datastore API and runs ~3-5 min.
           # We cap with --limit 200000 in CI to keep job time bounded
           # while still covering the multi-page pagination logic.
-          - { name: qld, module: au_qld, min: 50000,   max: 250000,  limit: "--limit 200000" }
+          - { name: qld, module: au_qld, min: 50000,    max: 250000,   limit: "--limit 200000" }
     name: ${{ matrix.name }}
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
