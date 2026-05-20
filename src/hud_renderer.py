@@ -47,12 +47,17 @@ SIGN_CX = FB_W - 65
 SIGN_CY = FB_H // 2 + 10
 
 
-def _build_base_layer(fb, speed_limit):
+def _build_base_layer(fb, speed_limit, low_confidence=False):
     """Pre-render the static background layer: bg + arc track + limit sign.
 
     Call once at startup or when speed_limit changes.  Returns a snapshot
     (bytearray copy) of the buffer that can be blitted back each frame
     instead of redrawing.
+
+    When `low_confidence` is True we keep the sign chrome but render
+    "--" instead of a number -- the DB hit was single-source / OSM-only
+    and the project's "宁可不报" policy forbids displaying a value the
+    cross-verify pipeline didn't elevate to OFFICIAL_ONLY or higher.
     """
     fb.clear(COL_BG)
 
@@ -64,7 +69,7 @@ def _build_base_layer(fb, speed_limit):
     fb.fill_circle(SIGN_CX, SIGN_CY, SIGN_R, COL_LIMIT_RING)
     fb.fill_circle(SIGN_CX, SIGN_CY, SIGN_R - 5, COL_LIMIT_BG)
 
-    limit_str = str(speed_limit)
+    limit_str = "--" if low_confidence else str(speed_limit)
     limit_scale = 2
     limit_tw = fb.measure_text(limit_str, limit_scale)
     limit_th = GLYPH_H * limit_scale
@@ -82,7 +87,7 @@ class HUDState:
     """Track previous frame state for delta rendering."""
     __slots__ = ('speed_int', 'over_limit', 'valid', 'satellites',
                  'fix_quality', 'base_layer', 'speed_limit',
-                 'camera_detected')
+                 'camera_detected', 'limit_low_confidence')
 
     def __init__(self):
         self.speed_int = -1
@@ -93,6 +98,10 @@ class HUDState:
         self.base_layer = None
         self.speed_limit = -1
         self.camera_detected = False
+        # Tracks the renderer-visible confidence flag so a toggle between
+        # "show number" and "show --" forces a base-layer rebuild even
+        # when the numeric limit hasn't changed.
+        self.limit_low_confidence = False
 
 
 def draw_menu_icon(fb, cx, cy, color):
@@ -132,11 +141,19 @@ def render_hud(fb, gps, state, detect, default_speed_limit):
     # Dynamic speed limit from NPU detection
     current_limit = detect.speed_limit if detect else default_speed_limit
     camera = detect.camera_detected if detect else False
+    # When the fused source is DB_LOW_CONFIDENCE we keep current_limit
+    # for the over-limit logic but render "--" on the sign. Falls back
+    # to False so callers that don't pass DetectionState still work.
+    low_conf = bool(getattr(detect, "limit_low_confidence", False)
+                    if detect else False)
 
+    # Over-limit hint stays based on the numeric value -- if the driver
+    # is doing 80 in a possibly-50 zone we still highlight the speed.
     over_limit = speed_int > current_limit
 
     # --- Delta check: skip full redraw if nothing changed ---
-    limit_changed = state.speed_limit != current_limit
+    limit_changed = (state.speed_limit != current_limit
+                     or state.limit_low_confidence != low_conf)
     needs_rebuild = limit_changed or state.base_layer is None
     if (not needs_rebuild and
             state.speed_int == speed_int and
@@ -149,7 +166,8 @@ def render_hud(fb, gps, state, detect, default_speed_limit):
 
     # Rebuild base layer if speed limit changed or invalidated
     if needs_rebuild:
-        state.base_layer = _build_base_layer(fb, current_limit)
+        state.base_layer = _build_base_layer(fb, current_limit,
+                                             low_confidence=low_conf)
     fb.buf[:] = state.base_layer
 
     state.speed_int = speed_int
@@ -159,6 +177,7 @@ def render_hud(fb, gps, state, detect, default_speed_limit):
     state.fix_quality = gps.fix_quality
     state.speed_limit = current_limit
     state.camera_detected = camera
+    state.limit_low_confidence = low_conf
 
     # --- Colors based on state ---
     speed_color = COL_RED if over_limit else COL_WHITE

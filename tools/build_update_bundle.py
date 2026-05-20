@@ -46,6 +46,10 @@ FILE_MAP = [
     ("src/web_config.py",     "/root/web_config.py",       "0644"),
     ("src/config_manager.py", "/root/config_manager.py",   "0644"),
     ("src/speed_db.py",       "/root/speed_db.py",         "0644"),
+    # db_signer ships next to speed_db so the on-device HMAC verify
+    # path can `import db_signer` -- same source of truth the builder
+    # uses to write the .sig sidecars, so the two can never drift.
+    ("src/db_signer.py",      "/root/db_signer.py",        "0644"),
     ("src/sun.py",            "/root/sun.py",              "0644"),
     ("src/usb_netd.py",       "/root/usb_netd.py",         "0644"),
     ("src/touch_input.py",    "/root/touch_input.py",      "0644"),
@@ -58,6 +62,14 @@ FILE_MAP = [
     ("data/speed_cameras.db",   "/root/data/speed_cameras.db",   "0644"),
     ("data/speed_zones_cn.db",  "/root/data/speed_zones_cn.db",  "0644"),
     ("data/speed_cameras_cn.db","/root/data/speed_cameras_cn.db","0644"),
+    # Companion HMAC-SHA256 signatures. Pairing them in FILE_MAP (rather
+    # than OPTIONAL_FILE_MAP) means the bundle build fails noisily if
+    # a .sig is missing instead of shipping an unsignable DB that the
+    # device will silently reject post-deploy.
+    ("data/speed_zones.db.sig",     "/root/data/speed_zones.db.sig",     "0644"),
+    ("data/speed_cameras.db.sig",   "/root/data/speed_cameras.db.sig",   "0644"),
+    ("data/speed_zones_cn.db.sig",  "/root/data/speed_zones_cn.db.sig",  "0644"),
+    ("data/speed_cameras_cn.db.sig","/root/data/speed_cameras_cn.db.sig","0644"),
 
     # init.d scripts -- need +x. The launcher reapplies mode after push
     # because adb sometimes drops it.

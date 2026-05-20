@@ -40,6 +40,20 @@ except ImportError:
     print("ERROR: PyYAML is required. Install with: pip install pyyaml")
     sys.exit(1)
 
+# db_signer lives in src/ -- one source of truth for signing logic
+# shared with both the device-side loader and the new build_db.py.
+# Import once at module load so _sign_artifact() doesn't mutate
+# sys.path on every call.
+_REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.join(_REPO_ROOT, "src"))
+try:
+    import db_signer as _signer
+except ImportError as _e:
+    print(f"WARNING: db_signer unavailable ({_e}); .db files will not "
+          "be signed. Device will reject them unless ENFORCE_DB_SIGNATURE "
+          "is off.")
+    _signer = None
+
 # ---------------------------------------------------------------------------
 # Binary format (must match src/speed_db.py)
 # ---------------------------------------------------------------------------
@@ -119,6 +133,21 @@ def grid_key(lat, lon, grid_res):
     gi_u = (gi + 32768) & 0xFFFF
     gj_u = (gj + 32768) & 0xFFFF
     return (gi_u << 16) | gj_u
+
+
+def _sign_artifact(path):
+    """Co-locate an HMAC-SHA256 .sig sidecar next to the written DB.
+
+    Module-level import resolves _signer once; if it's None the
+    builder still completes but the device rejects the unsigned
+    artifact -- the safer failure mode.
+    """
+    if _signer is None:
+        return
+    from pathlib import Path
+    key = _signer.load_key()
+    sig_path = _signer.sign_file(Path(path), key)
+    print(f"  Signed -> {sig_path}")
 
 
 def write_db(path, magic, records, grid_res):
@@ -213,62 +242,10 @@ def overpass_curl(query, label, api_url):
 
 
 # ---------------------------------------------------------------------------
-# Geometry utilities
+# Geometry utilities -- shared with the new fetcher pipeline.
 # ---------------------------------------------------------------------------
 
-def sample_linestring(coords, interval_m=30):
-    """Sample points along a LineString at fixed intervals."""
-    M_PER_DEG = 111_320.0
-
-    if len(coords) < 2:
-        if coords:
-            yield (coords[0][1], coords[0][0])
-        return
-
-    yield (coords[0][1], coords[0][0])
-
-    accum = 0.0
-    for i in range(1, len(coords)):
-        lat1, lon1 = coords[i-1][1], coords[i-1][0]
-        lat2, lon2 = coords[i][1], coords[i][0]
-
-        dlat = (lat2 - lat1) * M_PER_DEG
-        cos_lat = math.cos(math.radians((lat1 + lat2) / 2))
-        dlon = (lon2 - lon1) * M_PER_DEG * cos_lat
-        seg_len = math.sqrt(dlat*dlat + dlon*dlon)
-
-        if seg_len < 0.01:
-            continue
-
-        pos = 0.0
-        while pos < seg_len:
-            remaining = interval_m - accum
-            if pos + remaining <= seg_len:
-                pos += remaining
-                frac = pos / seg_len
-                lat = lat1 + (lat2 - lat1) * frac
-                lon = lon1 + (lon2 - lon1) * frac
-                yield (lat, lon)
-                accum = 0.0
-            else:
-                accum += seg_len - pos
-                break
-
-    yield (coords[-1][1], coords[-1][0])
-
-
-def bearing_of_segment(coords):
-    """Compute bearing from first to last point."""
-    if len(coords) < 2:
-        return 0xFFFF
-    lat1, lon1 = coords[0][1], coords[0][0]
-    lat2, lon2 = coords[-1][1], coords[-1][0]
-    dlat = lat2 - lat1
-    dlon = lon2 - lon1
-    if abs(dlat) < 1e-8 and abs(dlon) < 1e-8:
-        return 0xFFFF
-    angle = math.degrees(math.atan2(dlon, dlat)) % 360
-    return int(round(angle))
+from tools.fetchers._geometry import sample_linestring, bearing_of_segment  # noqa: E402
 
 
 # ---------------------------------------------------------------------------
@@ -599,6 +576,7 @@ def main():
         if zone_records:
             zones_path = os.path.join(output_dir, zones_filename)
             write_db(zones_path, MAGIC_ZONES, zone_records, grid_res)
+            _sign_artifact(zones_path)
         else:
             print("  WARNING: No speed zone data available")
 
@@ -635,6 +613,7 @@ def main():
         if cam_records:
             cameras_path = os.path.join(output_dir, cameras_filename)
             write_db(cameras_path, MAGIC_CAMERAS, cam_records, grid_res)
+            _sign_artifact(cameras_path)
         else:
             print("  WARNING: No camera data available")
 

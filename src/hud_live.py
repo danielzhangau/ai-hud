@@ -390,6 +390,10 @@ class DetectionState:
         self.speed_limit = region_mgr.default_limit  # post-fusion display value
         self.camera_detected = False                  # post-fusion display value
         self.confidence = 0.0                          # mirrors raw_npu_confidence
+        # True when fusion source is DB_LOW_CONFIDENCE (single-source / OSM-only
+        # segment). hud_renderer renders "--" instead of the number in that
+        # case so the driver never sees an unverified limit per "宁可不报".
+        self.limit_low_confidence = False
         self.last_poll = 0
         self._last_mtime = 0
         self.npu_enabled = True  # user toggle for live detection
@@ -534,10 +538,12 @@ def main():
     SpeedDB_cls = None
     SpeedFusion_cls = None
     fuse_camera_warning_fn = None
+    SOURCE_DB_LOW_CONFIDENCE = "DB_LOW_CONFIDENCE"  # fallback if import fails
     try:
         from speed_db import SpeedDB as SpeedDB_cls
         from speed_db import SpeedFusion as SpeedFusion_cls
         from speed_db import fuse_camera_warning as fuse_camera_warning_fn
+        from speed_db import SOURCE_DB_LOW_CONFIDENCE
     except ImportError:
         print("Speed DB: module not available, using NPU only")
 
@@ -948,6 +954,7 @@ def main():
                 # --- Fuse speed DB + NPU results ---
                 if speed_fusion and gps.valid and gps.lat != 0.0:
                     db_limit = 0
+                    db_confidence = None
                     db_cameras = []
                     if speed_db:
                         db_result = speed_db.query(
@@ -955,6 +962,13 @@ def main():
                             camera_radius_m=speed_fusion.camera_alert_radius)
                         db_limit = db_result.speed_limit
                         db_cameras = db_result.cameras
+                        # v3 DBs carry per-record confidence. v1/v2 DBs
+                        # surface CONFIDENCE_UNKNOWN here, which fusion
+                        # treats as single-source -- the conservative
+                        # path. New keyword arg, defaults to None when
+                        # SpeedFusion is the older API.
+                        db_confidence = getattr(
+                            db_result, "speed_confidence", None)
 
                     # Fuse speed limit via state machine:
                     # DB is baseline, NPU can only lower (construction),
@@ -966,7 +980,13 @@ def main():
                     detect.speed_limit = speed_fusion.update(
                         db_limit,
                         detect.raw_npu_speed_limit,
-                        detect.raw_npu_confidence)
+                        detect.raw_npu_confidence,
+                        db_confidence=db_confidence)
+                    # Propagate the low-confidence flag for the renderer.
+                    # Only DB_LOW_CONFIDENCE downgrades the UI; NPU and
+                    # trusted DB results stay numeric.
+                    detect.limit_low_confidence = (
+                        speed_fusion.source == SOURCE_DB_LOW_CONFIDENCE)
 
                     # Fuse camera warning: DB proximity OR NPU detection
                     if fuse_camera_warning_fn is not None:
