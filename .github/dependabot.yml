@@ -16,3 +16,14 @@ updates:
     labels:
       - "dependencies"
       - "ci"
+    # Roll all GitHub Actions updates into a single weekly PR. Without
+    # this, a Node-runtime bump (e.g. Node 20 -> Node 24) tends to
+    # cascade across every action and produce 5+ near-identical PRs
+    # that all need the same review attention. Grouping keeps reviews
+    # in one place; if the grouped PR breaks CI, the failure mode is
+    # almost always "runner doesn't support the new Node version yet"
+    # which is the same root cause for all the actions.
+    groups:
+      github-actions:
+        patterns:
+          - "*"
