@@ -47,25 +47,26 @@ jobs:
         # The matrix lets one bad fetcher fail without taking down the
         # others -- you see the full picture in one job run.
         include:
-          # Baselines captured from the first live CI run, 2026-05-20.
-          # Re-scaled later that day when default sample_interval_m
-          # moved from 30m to 80m to keep speed_zones.db under GitHub's
-          # 100 MB file limit -- LineString-derived counts drop ~37.5%.
+          # Baselines: 2026-05-20 live CI run, scaled twice that day
+          # as default sample_interval_m moved 30m -> 80m -> 100m to
+          # fit speed_zones.db under GitHub's 100 MB per-file ceiling
+          # (the 80m revision wrote 100.68 MB -- 0.68 MB over the
+          # hard limit; 100m gives ~85 MB with comfortable margin).
           #
-          # Band is roughly [actual * 0.5, actual * 1.6]; normal
-          # upstream growth/shrink slips through, schema-break symptoms
-          # (silent zero, 10x rows) still trip the gate.
+          # Band is [actual * 0.5, actual * 1.6]; normal upstream
+          # growth/shrink slips through, schema-break symptoms (silent
+          # zero, 10x rows) still trip the gate.
           #
-          # Expected at 80m sampling, derived from 30m actuals:
-          #   nsw ~2.4M  vic ~5.9M  wa ~406K  act ~56K  qld unchanged
-          - { name: nsw, module: au_nsw, min: 1500000, max: 5000000,  limit: "" }
-          - { name: wa,  module: au_wa,  min: 250000,  max: 700000,   limit: "" }
-          - { name: vic, module: au_vic, min: 4000000, max: 10000000, limit: "" }
-          - { name: act, module: au_act, min: 30000,   max: 100000,   limit: "" }
+          # Expected at 100m sampling (30/100 = 0.3x of original):
+          #   nsw ~1.96M  vic ~4.7M  wa ~325K  act ~45K  qld unchanged
+          - { name: nsw, module: au_nsw, min: 1200000, max: 4000000, limit: "" }
+          - { name: wa,  module: au_wa,  min: 200000,  max: 550000,  limit: "" }
+          - { name: vic, module: au_vic, min: 3000000, max: 8000000, limit: "" }
+          - { name: act, module: au_act, min: 25000,   max: 80000,   limit: "" }
           # QLD is point-data per posted sign, unaffected by sampling.
           # 64 LGAs via CKAN datastore API runs ~3-5 min; --limit caps
           # CI time while still exercising the multi-page pagination.
-          - { name: qld, module: au_qld, min: 50000,   max: 250000,   limit: "--limit 200000" }
+          - { name: qld, module: au_qld, min: 50000,   max: 250000,  limit: "--limit 200000" }
     name: ${{ matrix.name }}
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4

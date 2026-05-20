@@ -186,7 +186,7 @@ class OSMAUFetcher(SourceFetcher):
     state = "AU"   # multi-state fetcher; per-segment .state is set per query
 
     def __init__(self, states: list[str] | None = None,
-                 sample_interval_m: float = 80.0,
+                 sample_interval_m: float = 100.0,
                  delay_between_states_s: float = 3.0):
         # `states=None` means every AU state; smoke tests pass a short list
         # to avoid Overpass rate-limits on iteration.
@@ -236,7 +236,7 @@ def _main():
                     help="comma-separated state codes (default: all 8)")
     ap.add_argument("--limit", type=int, default=None)
     ap.add_argument("--no-archive", action="store_true")
-    ap.add_argument("--interval", type=float, default=80.0)
+    ap.add_argument("--interval", type=float, default=100.0)
     args = ap.parse_args()
     states = [s.strip() for s in args.states.split(",") if s.strip()] or None
     fetcher = OSMAUFetcher(states=states,

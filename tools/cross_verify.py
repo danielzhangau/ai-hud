@@ -87,16 +87,16 @@ OFFICIAL_BITS = (SRC_BIT_VIC | SRC_BIT_NSW | SRC_BIT_QLD | SRC_BIT_WA
 
 # Spatial / value tolerances. Tuning notes inline so future bumps
 # carry their rationale forward.
-# Bumped 30 -> 80 on 2026-05-20 alongside fetcher sampling. The
-# previous 30m radius assumed dense 30m point sampling so adjacent
-# sources had a point within ~30m of each other. At 80m sampling
-# (chosen to keep the generated .db under GitHub's 100 MB file limit
-# while still over-covering the device's 150m query window), matched
-# pairs land up to 80m apart, so the radius matches. Looser matching
-# could pair parallel roads (frontage + highway) but their differing
-# speed limits self-correct via "宁可不报" -- the spread quarantines
-# the cluster rather than confirming the wrong value.
-MATCH_RADIUS_M = 80.0
+# Bumped 30 -> 80 -> 100 on 2026-05-20 chasing GitHub's 100 MB
+# per-file ceiling (the 80m revision wrote 100.68 MB, 0.68 MB over).
+# The radius mirrors fetcher sample_interval_m so adjacent same-
+# direction sources reliably find each other -- a sample from source
+# A is at most one interval away from B's nearest sample on the same
+# road. Looser matching can pair parallel roads (frontage + highway)
+# but their differing speed limits self-correct via "宁可不报":
+# the spread quarantines the cluster rather than confirming the
+# wrong value.
+MATCH_RADIUS_M = 100.0
 MATCH_BEARING_DEG = 45.0   # accept opposite-direction segments
                             # as agreement if their bearings differ
                             # by <=45 (or either is sentinel).
