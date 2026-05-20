@@ -115,10 +115,12 @@ echo "==> Staging files onto $MOUNTPOINT"
 export COPYFILE_DISABLE=1
 
 # Per-platform subdirectories so the customer can tell at a glance
-# which folder applies to their OS. The macOS Config.zip is at the
-# top level too (this is the primary platform) so Mac users don't
-# have to dig.
-cp "$MAC_ZIP" "$MOUNTPOINT/AI-HUD Config.zip"
+# which folder applies to their OS. We deliberately do NOT also stage
+# a copy at the root -- that used to create the impression that the
+# root zip and the For macOS/ zip were different files (they were
+# identical) and made Windows users wonder why "their" zip wasn't at
+# the top level. HOW-TO-OPEN.md at the root tells everyone which
+# folder to open.
 mkdir -p "$MOUNTPOINT/For macOS"
 cp "$MAC_ZIP" "$MOUNTPOINT/For macOS/AI-HUD Config.zip"
 

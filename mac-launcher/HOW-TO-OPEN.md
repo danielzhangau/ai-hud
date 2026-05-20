@@ -8,7 +8,7 @@
 
 第一次打开（重要 -- Gatekeeper 安全机制）：
 
-1. 解压 `AI-HUD Config.zip`（或打开 `For macOS/` 子目录里的版本）
+1. 打开 `For macOS/` 文件夹，解压 `AI-HUD Config.zip`
 2. 把 `AI-HUD Config.app` 拖到 `应用程序` 文件夹（或桌面）
 3. **右键单击** `AI-HUD Config.app`，选择 **"打开"**（不是双击）
 4. 弹出警告："无法验证开发者..."，点击 **"打开"** 按钮
