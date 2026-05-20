@@ -122,6 +122,44 @@ def _device_version(adb_path):
     return "0.0.0"  # treat missing as ancient so we offer to update
 
 
+def _write_device_update_status(adb_path, current, latest, available, url=None):
+    """Write a small JSON sidecar at /tmp/ai_hud_update_status.json on the
+    device so hud_live.py's dashboard can show a "new version" banner.
+
+    Called after every GitHub probe -- including when the user declines
+    the upgrade or when nothing newer is available. The device's
+    /api/state surfaces the file; if it's missing the banner stays
+    hidden (graceful degrade).
+
+    Best-effort: if adb push fails we just log and return -- the banner
+    will simply be stale until the next launcher run.
+    """
+    import time
+    payload = json.dumps({
+        "current":          current,
+        "latest":           latest,
+        "update_available": bool(available),
+        "checked_at":       int(time.time()),
+        "url":              url,
+    })
+    # adb shell quoting is unreliable for JSON (curly braces, quotes);
+    # write to a host tempfile then `adb push`.
+    with tempfile.NamedTemporaryFile(
+            mode="w", suffix=".json", delete=False) as tmp:
+        tmp.write(payload)
+        tmp_path = tmp.name
+    try:
+        rc, _, err = _adb(adb_path, "push", tmp_path,
+                          "/tmp/ai_hud_update_status.json", timeout=8)
+        if rc != 0:
+            print(f"[updater] could not write update-status sidecar: {err}")
+    finally:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+
+
 # --- HTTP helpers -----------------------------------------------------------
 
 def _http_get_json(url, timeout=8):
@@ -262,7 +300,17 @@ def main():
         return 0
     print(f"[updater] latest release: {latest}")
 
-    if _semver_tuple(current) >= _semver_tuple(latest):
+    available = _semver_tuple(latest) > _semver_tuple(current)
+    # Write update-status sidecar regardless of whether we'll apply --
+    # the dashboard banner needs to know about pending versions even if
+    # the user just dismissed our dialog. Done before the dialog so a
+    # cancelled dialog still leaves the banner up.
+    _write_device_update_status(
+        args.adb, current=current, latest=latest,
+        available=available, url=release.get("html_url"),
+    )
+
+    if not available:
         print("[updater] device is up to date")
         return 0
 

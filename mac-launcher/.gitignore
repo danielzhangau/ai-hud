@@ -1,3 +1,4 @@
 # Build outputs and platform-tools cache -- recreated by build.sh
 dist/
 .cache/
+assets/AI-HUD.iconset/

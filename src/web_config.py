@@ -32,6 +32,34 @@ from config_manager import PARAM_DEFS, get_choices
 DEFAULT_HOST = "0.0.0.0"
 DEFAULT_PORT = 80
 
+# Launcher's updater.py drops a small JSON sidecar here whenever it
+# finishes a GitHub release probe (regardless of whether the user
+# accepted the update). Dashboard reads this for the "new version"
+# banner; absent or malformed -> banner stays hidden.
+_UPDATE_STATUS_PATH = "/tmp/ai_hud_update_status.json"
+
+
+def _read_update_status():
+    """Return the dict from /tmp/ai_hud_update_status.json or None.
+
+    Schema written by updater.py:
+        {
+          "current":      "0.1.0",          # device's version at probe time
+          "latest":       "0.2.0",          # GitHub tag_name (no 'v' prefix)
+          "update_available": True,         # bool, derived from semver
+          "checked_at":   1716234000,       # unix seconds, probe time
+          "url":          "https://..."     # release page (optional)
+        }
+    """
+    try:
+        with open(_UPDATE_STATUS_PATH, "r") as f:
+            data = json.load(f)
+        if not isinstance(data, dict):
+            return None
+        return data
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        return None
+
 
 # ---------------------------------------------------------------------------
 # Schema introspection
@@ -164,6 +192,15 @@ _INDEX_HTML = """<!DOCTYPE html>
     pointer-events: none; }
   #toast.show { opacity: 1; }
   #toast.err { border-color: var(--red); color: var(--red); }
+  /* Update banner -- shown only when launcher saw a newer release on
+     GitHub. Amber to read as "info / action needed", not red. */
+  #update-banner { display: none; margin-top: 16px; padding: 12px 16px;
+    background: rgba(245, 179, 66, 0.10); border: 1px solid var(--amber);
+    border-radius: 6px; font-size: 13px; line-height: 1.5; }
+  #update-banner.show { display: block; }
+  #update-banner .title { font-weight: 600; color: var(--amber); margin-bottom: 4px; }
+  #update-banner .body { color: var(--white); }
+  #update-banner .hint { color: var(--dim); font-size: 12px; margin-top: 6px; }
   footer { margin-top: 32px; padding: 12px 4px; font-size: 11px; color: var(--dim);
     border-top: 1px solid var(--sep); display: flex; justify-content: space-between; }
 </style>
@@ -174,6 +211,14 @@ _INDEX_HTML = """<!DOCTYPE html>
     <h1>AI-HUD Dashboard</h1>
     <span id="conn" class="status">connecting...</span>
   </header>
+
+  <!-- Update banner: hidden by default, shown when /api/state reports
+       status.update.update_available = true. Filled in by render(). -->
+  <div id="update-banner">
+    <div class="title">New version available</div>
+    <div class="body" id="update-body">--</div>
+    <div class="hint">To install: close this browser tab, then double-click the AI-HUD Config launcher again. It will offer the update on startup.</div>
+  </div>
 
   <section class="card">
     <h2>Live status</h2>
@@ -305,9 +350,19 @@ function renderSettingItem(section, item, value) {
   if (item.kind === "toggle") row.appendChild(makeToggle(section, item, value));
   return row;
 }
+function renderUpdateBanner(upd) {
+  const b = $("update-banner");
+  if (!upd || !upd.update_available) { b.classList.remove("show"); return; }
+  const cur = upd.current || "?";
+  const lat = upd.latest  || "?";
+  $("update-body").textContent =
+    "Device is on v" + cur + ", v" + lat + " is available on GitHub.";
+  b.classList.add("show");
+}
 function render() {
   if (!STATE) return;
   renderStatus(STATE.status || {});
+  renderUpdateBanner(STATE.status && STATE.status.update);
   $("ver").textContent = "v" + (STATE.status && STATE.status.version || "?");
   const setup = $("setup-panel"); setup.innerHTML = "";
   if (SCHEMA && SCHEMA.settings && SCHEMA.settings.length) {
@@ -475,6 +530,13 @@ class WebConfigServer:
             status.update(extra)
         except Exception as e:
             status["status_error"] = str(e)
+        # Update-status sidecar: written by the launcher's updater.py on
+        # every connection. Tells the dashboard whether a newer release is
+        # waiting and when the launcher last checked. Best-effort -- if the
+        # file is missing or malformed the banner just stays hidden.
+        upd = _read_update_status()
+        if upd is not None:
+            status["update"] = upd
         return {"settings": settings, "status": status}
 
     # -- apply config change ---------------------------------------------

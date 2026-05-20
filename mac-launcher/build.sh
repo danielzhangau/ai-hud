@@ -78,6 +78,16 @@ mkdir -p "$APP_DIR/Contents/MacOS"
 mkdir -p "$APP_DIR/Contents/Resources"
 
 cp "$SRC_DIR/Info.plist"          "$APP_DIR/Contents/Info.plist"
+# App icon. Placeholder for now (see mac-launcher/build_icon.py for
+# the generator); when a designed .icns ships, drop it at the same path.
+ICON_SRC="$SCRIPT_DIR/assets/AI-HUD.icns"
+if [ -f "$ICON_SRC" ]; then
+    cp "$ICON_SRC" "$APP_DIR/Contents/Resources/AI-HUD.icns"
+else
+    echo "    Warning: $ICON_SRC missing -- app will show a generic icon."
+    echo "             Run: python3 mac-launcher/build_icon.py && \\"
+    echo "                  iconutil -c icns mac-launcher/assets/AI-HUD.iconset"
+fi
 cp "$SRC_DIR/launch.sh"           "$APP_DIR/Contents/MacOS/launch"
 cp "$ADB_BIN"                     "$APP_DIR/Contents/MacOS/adb"
 # Firmware flasher (MaskROM-mode device) -- distinct from the OTA path:
@@ -115,13 +125,13 @@ if command -v codesign >/dev/null 2>&1; then
 fi
 
 # --- Build distributable zip ------------------------------------------------
-# Ships the .app together with the Chinese end-user instructions so the
-# recipient gets everything needed in one download.
+# Just the .app -- nothing else. HOW-TO-OPEN.md lives at the AIHUD U-disk
+# root (staged by tools/build_launcher_disk.sh), not inside the zip, so
+# customers don't see two copies after unzipping.
 echo "==> Packaging distributable zip..."
-cp "$SCRIPT_DIR/HOW-TO-OPEN.md" "$DIST_DIR/HOW-TO-OPEN.md"
 DIST_ZIP="$DIST_DIR/AI-HUD Config.zip"
 rm -f "$DIST_ZIP"
-( cd "$DIST_DIR" && zip -ryq "AI-HUD Config.zip" "AI-HUD Config.app" "HOW-TO-OPEN.md" )
+( cd "$DIST_DIR" && zip -ryq "AI-HUD Config.zip" "AI-HUD Config.app" )
 
 echo
 echo "==> Done."
