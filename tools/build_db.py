@@ -32,10 +32,18 @@ import sys
 import time
 from pathlib import Path
 
-# Make src/ importable for the binary format constants. We deliberately
-# import from src/speed_db.py rather than copy-pasting the format so
-# the writer and reader can never drift.
+# Make src/ + repo root importable. We need both because:
+#   - src/    -> for speed_db.py and db_signer.py (device-side modules
+#                that we also use here to avoid wire-format drift)
+#   - root/   -> for `from tools.fetchers...` and `from tools import
+#                cross_verify` style imports. Adding root is the fix
+#                for running via `python3 tools/build_db.py` directly
+#                (the CI shape): Python prepends the SCRIPT's dir to
+#                sys.path, not the repo root, so `from tools import X`
+#                fails without this. `python3 -m tools.build_db` works
+#                without it, but the workflow calls the script form.
 _REPO_ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(_REPO_ROOT))
 sys.path.insert(0, str(_REPO_ROOT / "src"))
 
 import speed_db as sdb  # noqa: E402
