@@ -87,7 +87,7 @@ class VICFetcher(SourceFetcher):
     name = "AU_VIC_GOV"
     state = "VIC"
 
-    def __init__(self, sample_interval_m: float = 30.0):
+    def __init__(self, sample_interval_m: float = 80.0):
         self.interval = sample_interval_m
 
     def fetch(self, limit: int | None = None,
@@ -183,7 +183,7 @@ def _main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--limit", type=int, default=None)
     ap.add_argument("--no-archive", action="store_true")
-    ap.add_argument("--interval", type=float, default=30.0)
+    ap.add_argument("--interval", type=float, default=80.0)
     args = ap.parse_args()
     fetcher = VICFetcher(sample_interval_m=args.interval)
     segs = fetcher.fetch(limit=args.limit, archive=not args.no_archive)
