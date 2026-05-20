@@ -19,7 +19,13 @@ on:
 jobs:
   build:
     runs-on: ubuntu-22.04
-    timeout-minutes: 120
+    # 180 min, not 120: v0.2.0's run hit the 120 ceiling at exactly
+    # 2h00m (sdk-build itself finished all steps; the kill came at the
+    # job-level timeout). Earlier successful runs ran ~1h45m, so 120
+    # left only a 15 min cushion -- one bad shared-runner allocation
+    # and we overrun. 180 covers normal jitter without raising actual
+    # cost: GitHub bills on elapsed time, not the timeout ceiling.
+    timeout-minutes: 180
     outputs:
       artifact-name: ${{ steps.set-artifact-name.outputs.name }}
 
