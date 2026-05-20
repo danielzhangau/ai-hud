@@ -1,0 +1,99 @@
+name: Fetcher Smoke Test
+
+# Runs each per-source fetcher against its live upstream and verifies
+# that:
+#   1. the download succeeds (DNS + cert + endpoint still alive),
+#   2. parsing produces a non-zero segment count, and
+#   3. the count falls within a sane band (catches schema breakage --
+#      e.g. an upstream renaming SPEED_LIMIT to SPEED_LIMITS and
+#      silently producing zero rows would otherwise leak to prod).
+#
+# The thresholds below come from the 2026-05-20 baseline survey. When
+# upstream genuinely shrinks or grows beyond the band, bump the
+# numbers in the same PR that explains *why* (e.g. "QLD merged 3
+# LGAs into one resource"). Avoid loosening the bound silently.
+
+on:
+  # Trigger on any change to fetcher code itself, so PRs that touch
+  # parsing logic get exercised against the live data before merge.
+  pull_request:
+    paths:
+      - "tools/fetchers/**"
+      - ".github/workflows/fetcher-smoke.yml"
+  # Daily run catches upstream schema drift even on quiet weeks.
+  schedule:
+    - cron: "0 6 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: fetcher-smoke-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  smoke:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        # Each entry: fetcher module + (min_segments, max_segments).
+        # min  -- below this means "fetcher returned nothing useful";
+        #         hard fail.
+        # max  -- above this means "upstream schema changed and we're
+        #         now picking up rows we used to filter"; hard fail.
+        # The matrix lets one bad fetcher fail without taking down the
+        # others -- you see the full picture in one job run.
+        include:
+          - { name: nsw, module: au_nsw, min: 1500000, max: 5000000, limit: "" }
+          - { name: wa,  module: au_wa,  min: 100000,  max: 500000,  limit: "" }
+          - { name: vic, module: au_vic, min: 2000000, max: 8000000, limit: "" }
+          - { name: act, module: au_act, min: 10000,   max: 100000,  limit: "" }
+          # QLD pulls 64 LGAs via CKAN datastore API and runs ~3-5 min.
+          # We cap with --limit 200000 in CI to keep job time bounded
+          # while still covering the multi-page pagination logic.
+          - { name: qld, module: au_qld, min: 50000,   max: 250000,  limit: "--limit 200000" }
+    name: ${{ matrix.name }}
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+
+      - name: Set up Python
+        run: python3 -V
+
+      - name: Run fetcher and capture count
+        id: run
+        run: |
+          # The fetcher prints "generated N segments" -- grep that out
+          # as the post-filter authoritative count. --no-archive keeps
+          # the runner's disk lean and skips the gzip step which is
+          # only useful for local diff workflows anyway.
+          set -o pipefail
+          python3 -m tools.fetchers.${{ matrix.module }} \
+                  --no-archive ${{ matrix.limit }} 2>&1 | tee out.log
+          count=$(grep -oE 'generated [0-9,]+ segments' out.log \
+                  | head -1 \
+                  | grep -oE '[0-9,]+' \
+                  | tr -d ',')
+          if [ -z "$count" ]; then
+              echo "ERROR: did not find 'generated N segments' in fetcher output"
+              exit 1
+          fi
+          echo "count=$count" >> "$GITHUB_OUTPUT"
+          echo "Fetcher ${{ matrix.name }} produced $count segments"
+
+      - name: Range check
+        run: |
+          count=${{ steps.run.outputs.count }}
+          min=${{ matrix.min }}
+          max=${{ matrix.max }}
+          if [ "$count" -lt "$min" ]; then
+              echo "::error::${{ matrix.name }} below floor: $count < $min"
+              exit 1
+          fi
+          if [ "$count" -gt "$max" ]; then
+              echo "::error::${{ matrix.name }} above ceiling: $count > $max"
+              exit 1
+          fi
+          echo "OK: $min <= $count <= $max"
