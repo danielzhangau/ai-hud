@@ -117,22 +117,21 @@ static inline float deqnt_affine_to_f32(int8_t qnt, int32_t zp, float scale) {
  * the logit domain, so we can filter in quantized space for speed.
  * -------------------------------------------------------------------------- */
 
-static inline float sigmoid(float x) {
-    return 1.0f / (1.0f + expf(-x));
-}
-
-static inline float unsigmoid(float y) {
-    return -logf(1.0f / y - 1.0f);
-}
-
 /*
- * Convert a float threshold to the INT8 quantized domain.
- * If sigmoid(deqnt(qnt)) > threshold, then qnt > qnt_threshold.
- * This allows early rejection without dequantization.
+ * Convert a float probability threshold directly to the INT8 quantized domain.
+ *
+ * The airockchip yolov5 fork bakes sigmoid into every Detect head when
+ * exporting with --rknpu (models/yolo.py: `z.append(torch.sigmoid(self.m[i]
+ * (x[i])))`), so RKNN outputs are already in [0,1] probability space, NOT
+ * raw logits. That matches the observed RV1106 quantization params zp=-128,
+ * scale=1/255 (which maps [0,1] -> INT8 [-128,127]).
+ *
+ * Consequence: post_process must NOT apply sigmoid again. Dequantized values
+ * are the final probabilities. Threshold check becomes a plain affine
+ * inversion of the quantization formula.
  */
 static inline int8_t qnt_threshold(float threshold, int32_t zp, float scale) {
-    float logit = unsigmoid(threshold);
-    float qnt_f = logit / scale + (float)zp;
+    float qnt_f = threshold / scale + (float)zp;
     /* Clamp to int8 range */
     if (qnt_f > 127.0f) return 127;
     if (qnt_f < -128.0f) return -128;
@@ -386,14 +385,16 @@ static int process_head(int8_t *input, const int *anchor, int grid_h, int grid_w
                 if (best_cls_qnt < qnt_obj_thresh)
                     continue;
 
-                /* Dequantize objectness and apply sigmoid */
-                float obj_conf = sigmoid(deqnt_affine_to_f32(obj_qnt, zp, scale));
+                /*
+                 * Dequantize objectness directly -- NO sigmoid.
+                 * RKNN outputs (airockchip --rknpu) are already sigmoid'd.
+                 */
+                float obj_conf = deqnt_affine_to_f32(obj_qnt, zp, scale);
                 if (obj_conf < conf_threshold)
                     continue;
 
-                /* Only sigmoid the winning class (1 expf instead of OBJ_CLASS_NUM) */
-                float best_cls_score = sigmoid(
-                    deqnt_affine_to_f32(best_cls_qnt, zp, scale));
+                float best_cls_score =
+                    deqnt_affine_to_f32(best_cls_qnt, zp, scale);
 
                 float final_score = obj_conf * best_cls_score;
                 if (final_score < conf_threshold)
@@ -402,17 +403,22 @@ static int process_head(int8_t *input, const int *anchor, int grid_h, int grid_w
                 if (count >= max_out)
                     return count;
 
-                /* Decode bounding box (YOLOv5 formula) */
+                /*
+                 * Decode bounding box. Because tx/ty/tw/th are already
+                 * sigmoid'd by the exported model, the YOLOv5 anchor decode
+                 * collapses from `(sigmoid(t)*2 - 0.5 + grid)*stride` to
+                 * `(t*2 - 0.5 + grid)*stride`. Same shape, no double sigmoid.
+                 */
                 float tx = deqnt_affine_to_f32(input[offset + 0], zp, scale);
                 float ty = deqnt_affine_to_f32(input[offset + 1], zp, scale);
                 float tw = deqnt_affine_to_f32(input[offset + 2], zp, scale);
                 float th = deqnt_affine_to_f32(input[offset + 3], zp, scale);
 
-                float bx = (sigmoid(tx) * 2.0f - 0.5f + (float)x) * (float)stride;
-                float by = (sigmoid(ty) * 2.0f - 0.5f + (float)y) * (float)stride;
-                float bw_half = (sigmoid(tw) * 2.0f);
+                float bx = (tx * 2.0f - 0.5f + (float)x) * (float)stride;
+                float by = (ty * 2.0f - 0.5f + (float)y) * (float)stride;
+                float bw_half = (tw * 2.0f);
                 bw_half = bw_half * bw_half * (float)anchor[a * 2 + 0] * 0.5f;
-                float bh_half = (sigmoid(th) * 2.0f);
+                float bh_half = (th * 2.0f);
                 bh_half = bh_half * bh_half * (float)anchor[a * 2 + 1] * 0.5f;
 
                 out[count].x1 = bx - bw_half;
