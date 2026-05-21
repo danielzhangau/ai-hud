@@ -27,6 +27,14 @@ jobs:
     uses: ./.github/workflows/sdk-build.yml
     with:
       version: ${{ github.ref_name }}
+    # Reusable workflows don't auto-inherit secrets from the caller.
+    # sdk-build.yml's Build SDK step needs AI_HUD_DB_SECRET to bake
+    # /etc/ai_hud_db_secret into the rootfs; without `secrets: inherit`
+    # it resolves to "" and the sanity check at the end fails.
+    # `inherit` is the recommended pattern for same-repo reusable
+    # workflows -- the callee is in the same trust boundary and this
+    # avoids having to maintain a parallel `secrets:` list in two files.
+    secrets: inherit
 
   # ---------------------------------------------------------------------------
   # 2. Generate changelog + publish GitHub Release with firmware attached

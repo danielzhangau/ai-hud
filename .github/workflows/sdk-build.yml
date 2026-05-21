@@ -132,6 +132,25 @@ jobs:
               echo "  $DEFCONFIG -> $(grep "^BR2_ROOTFS_POST_BUILD_SCRIPT" "$DEFCONFIG")"
           done
 
+      # ---- Fail fast if the secret isn't actually plumbed through ----
+      # The Build SDK step takes ~1h45m; we'd rather discover a missing
+      # AI_HUD_DB_SECRET in 5 seconds than 105 minutes. Common causes:
+      #   * Secret not configured at repo level (Settings -> Secrets)
+      #   * Reusable workflow called without `secrets: inherit` -- the
+      #     v0.3.0 release failure root cause; sdk-build.yml can't see
+      #     caller secrets unless the caller forwards them explicitly
+      - name: Verify AI_HUD_DB_SECRET reached the runner
+        env:
+          AI_HUD_DB_SECRET: ${{ secrets.AI_HUD_DB_SECRET }}
+        run: |
+          if [ -z "${AI_HUD_DB_SECRET:-}" ]; then
+              echo "::error::AI_HUD_DB_SECRET is empty. Configure it at repo"
+              echo "::error::Settings -> Secrets and ensure callers of this"
+              echo "::error::reusable workflow specify 'secrets: inherit'."
+              exit 1
+          fi
+          echo "Secret reached the runner (${#AI_HUD_DB_SECRET} bytes)"
+
       # ---- Build the SDK (RV1106G3 + Buildroot) ----
       - name: Build SDK
         working-directory: luckfox-pico
