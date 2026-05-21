@@ -169,12 +169,23 @@ jobs:
           # Sanity check -- the post-build hook should have left a
           # 0600 secret file in the staged rootfs. If this is missing
           # the firmware will boot but every signed DB will be rejected.
-          STAGED=$(find . -path "*/buildroot/output/target/etc/ai_hud_db_secret" | head -1)
-          if [ -z "$STAGED" ]; then
+          #
+          # Use `find` with a name match plus a loose */output/target/etc
+          # path filter rather than a hard-coded versioned glob. The old
+          # pattern "*/buildroot/output/target/etc/..." missed the real
+          # path (.../buildroot/buildroot-2023.02.6/output/...) so every
+          # run reported a false miss even when the hook ran successfully
+          # and wrote the file.
+          STAGED=$(find . -path '*/output/target/etc/ai_hud_db_secret' \
+                          -name ai_hud_db_secret -print -quit)
+          if [ -z "$STAGED" ] || [ ! -f "$STAGED" ]; then
               echo "::error::/etc/ai_hud_db_secret missing in staged rootfs"
+              echo "--- buildroot output/target/etc contents ---"
+              find . -path '*/output/target/etc' -type d \
+                    -exec sh -c 'echo "[in $1]"; ls -la "$1" 2>/dev/null | head -20' _ {} \;
               exit 1
           fi
-          echo "Secret staged: $STAGED ($(stat -c%a "$STAGED"), $(wc -c <"$STAGED") bytes)"
+          echo "Secret staged: $STAGED ($(stat -c%a "$STAGED") mode, $(wc -c <"$STAGED") bytes)"
 
       # ---- Compute artifact name (versioned when called from release.yml) ----
       - name: Compute artifact name
