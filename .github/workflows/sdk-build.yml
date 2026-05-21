@@ -90,44 +90,47 @@ jobs:
       # ---- Register the rootfs post-build hook ----
       # Drops scripts/buildroot_post_build.sh into Buildroot's
       # BR2_ROOTFS_POST_BUILD_SCRIPT slot so /etc/ai_hud_db_secret
-      # lands in the image. Grep the active defconfig instead of
-      # hard-coding the path -- the Luckfox SDK has shuffled
-      # defconfig locations across releases.
+      # lands in the image.
+      #
+      # We patch the *source* defconfigs under sysdrv/tools/board/buildroot/
+      # rather than the post-extract copies under sysdrv/source/buildroot/
+      # buildroot-2023.02.6/configs/. The Luckfox sysdrv Makefile ships
+      # Buildroot as a tarball and only extracts + cp's the defconfigs into
+      # configs/ on the first `./build.sh` invocation. Patching at the cp
+      # source lets build.sh pick the change up naturally without us having
+      # to fork the SDK's prepare flow.
       - name: Register Buildroot post-build hook
         run: |
           set -eu
           HOOK_SRC="$GITHUB_WORKSPACE/scripts/buildroot_post_build.sh"
           chmod +x "$HOOK_SRC"
 
-          DEFCONFIGS=$(find luckfox-pico/sysdrv/source/buildroot/buildroot/configs \
-                            -maxdepth 1 -name 'luckfox*_defconfig')
+          # All luckfox*_defconfig files the SDK cp's into Buildroot's
+          # configs/ tree -- patch every one so any board choice gets the
+          # hook (Pico Ultra uses luckfox_pico_w_defconfig per its
+          # BoardConfig-EMMC-Buildroot-RV1106_Luckfox_Pico_Ultra-IPC.mk).
+          SRC_DIR=luckfox-pico/sysdrv/tools/board/buildroot
+          DEFCONFIGS=$(find "$SRC_DIR" -maxdepth 1 -name 'luckfox*_defconfig')
           N=$(echo "$DEFCONFIGS" | grep -c .)
           if [ "$N" -eq 0 ]; then
-              echo "::error::No luckfox*_defconfig found under buildroot/configs"
-              ls luckfox-pico/sysdrv/source/buildroot/buildroot/configs/ || true
-              exit 1
-          elif [ "$N" -gt 1 ]; then
-              # Ambiguity is dangerous -- patching the wrong defconfig
-              # ships an image without the secret and the device
-              # rejects every signed DB silently. Force the operator
-              # to pin a single defconfig instead of guessing.
-              echo "::error::ambiguous defconfig (found $N matches):"
-              echo "$DEFCONFIGS"
+              echo "::error::No luckfox*_defconfig found under $SRC_DIR"
+              ls "$SRC_DIR" || true
               exit 1
           fi
-          DEFCONFIG="$DEFCONFIGS"
-          echo "Patching $DEFCONFIG"
+          echo "--- Defconfigs to patch ($N) ---"
+          echo "$DEFCONFIGS"
 
-          # Idempotent: replace any existing setting; append if absent.
-          # Absolute path so Buildroot finds the script regardless of
+          # Idempotent per file: replace existing setting; append if absent.
+          # Absolute HOOK_SRC so Buildroot finds the script regardless of
           # which CWD it execs from internally.
-          if grep -q "^BR2_ROOTFS_POST_BUILD_SCRIPT" "$DEFCONFIG"; then
-              sed -i "s|^BR2_ROOTFS_POST_BUILD_SCRIPT=.*|BR2_ROOTFS_POST_BUILD_SCRIPT=\"$HOOK_SRC\"|" "$DEFCONFIG"
-          else
-              echo "BR2_ROOTFS_POST_BUILD_SCRIPT=\"$HOOK_SRC\"" >> "$DEFCONFIG"
-          fi
-          echo "--- Post-build hook entry ---"
-          grep "^BR2_ROOTFS_POST_BUILD_SCRIPT" "$DEFCONFIG"
+          for DEFCONFIG in $DEFCONFIGS; do
+              if grep -q "^BR2_ROOTFS_POST_BUILD_SCRIPT" "$DEFCONFIG"; then
+                  sed -i "s|^BR2_ROOTFS_POST_BUILD_SCRIPT=.*|BR2_ROOTFS_POST_BUILD_SCRIPT=\"$HOOK_SRC\"|" "$DEFCONFIG"
+              else
+                  echo "BR2_ROOTFS_POST_BUILD_SCRIPT=\"$HOOK_SRC\"" >> "$DEFCONFIG"
+              fi
+              echo "  $DEFCONFIG -> $(grep "^BR2_ROOTFS_POST_BUILD_SCRIPT" "$DEFCONFIG")"
+          done
 
       # ---- Build the SDK (RV1106G3 + Buildroot) ----
       - name: Build SDK
