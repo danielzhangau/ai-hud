@@ -46,18 +46,23 @@ PARAM_DEFS = {
     #                     sun-position at runtime; this is just the last
     #                     known value so we don't flash the wrong tone for
     #                     the few seconds before the first GPS fix).
+    #   - display_mode:   "hud" (overlay) or "cam" (raw camera). Re-exposed
+    #                     2026-05-22 as an install-time aid -- installers
+    #                     flip to cam to aim the camera + confirm focus,
+    #                     then switch back to hud for production use.
     #
-    # Removed (display_mode/npu_enabled/brightness): see commit history.
-    # display_mode is always "hud" in production builds; npu_enabled is
+    # Removed (npu_enabled/brightness): see commit history. npu_enabled is
     # always on; brightness was a phantom setting nothing actually read.
     ("settings", "region"):        (str,   "au", None, None),
     ("settings", "mirror_display"): (int,   1,    0,    1),
     ("settings", "night_mode"):    (int,   0,    0,    1),
+    ("settings", "display_mode"):  (str,   "hud", None, None),
 }
 
 # Valid string choices (public: read via get_choices)
 _STR_CHOICES = {
     ("settings", "region"): ("au", "cn"),
+    ("settings", "display_mode"): ("hud", "cam"),
 }
 
 

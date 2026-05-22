@@ -747,6 +747,7 @@ def main():
                 status_fn=_build_status,
                 callbacks={
                     "on_mirror_change": _on_mirror_change,
+                    "on_display_mode_change": _on_display_mode_change,
                 },
             )
             if not web_server.start_in_thread():

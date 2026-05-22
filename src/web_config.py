@@ -68,14 +68,20 @@ def _read_update_status():
 # Human-friendly metadata for the small set of settings the dashboard
 # actually surfaces. Everything else is either auto-managed at runtime
 # (region, night_mode) or considered a developer-only knob hidden in
-# /root/ai_hud.conf (fusion.*). The web UI only exposes one toggle: the
-# install-time mirror flag.
+# /root/ai_hud.conf (fusion.*). The web UI exposes install-time choices:
+#   - mirror_display: windshield orientation
+#   - display_mode:   HUD overlay vs. raw camera (handy for aiming/focus)
 _KEY_META = {
     ("settings", "mirror_display"):
         {"label": "Mirror display", "order": 1,
          "desc": "Horizontally flip the HUD output. Turn on if the screen "
                  "is being reflected off the windshield; off if mounted "
                  "directly in front of the driver."},
+    ("settings", "display_mode"):
+        {"label": "Display mode", "order": 2,
+         "desc": "HUD shows the speed/limit overlay. CAM shows the raw "
+                 "camera feed full-screen -- use it during install to "
+                 "aim the camera and confirm focus."},
 }
 
 # Which settings the dashboard is allowed to write. Fusion and other
@@ -83,6 +89,7 @@ _KEY_META = {
 # but are not user-facing -- POST /api/config rejects them outright.
 _USER_EDITABLE = {
     ("settings", "mirror_display"),
+    ("settings", "display_mode"),
 }
 
 
@@ -152,8 +159,8 @@ _INDEX_HTML = """<!DOCTYPE html>
     padding: 14px 4px 18px; border-bottom: 2px solid var(--accent); }
   header.bar h1 { margin: 0; font-size: 20px; letter-spacing: 0.5px; }
   header.bar .status { font-size: 12px; color: var(--dim); }
-  header.bar .status.ok::before  { content: "\\25CF "; color: var(--green); }
-  header.bar .status.bad::before { content: "\\25CF "; color: var(--red); }
+  header.bar .status.ok::before  { content: "\\25CF"; color: var(--green); margin-right: 6px; }
+  header.bar .status.bad::before { content: "\\25CF"; color: var(--red); margin-right: 6px; }
   section.card { margin-top: 24px; }
   section.card h2 { font-size: 12px; color: var(--dim); margin: 0 0 8px;
     text-transform: uppercase; letter-spacing: 1.5px; }
@@ -186,6 +193,16 @@ _INDEX_HTML = """<!DOCTYPE html>
     border-radius: 50%; background: var(--knob); top: 3px; left: 3px;
     transition: left 0.15s; }
   .toggle.on::after { left: 23px; }
+  /* Segmented choice control (used for display_mode HUD/CAM). The toggle
+     above is for 0/1 booleans; the segment shows mutually-exclusive named
+     options so the user can read what they're picking. */
+  .seg { display: inline-flex; background: var(--off); border-radius: 6px;
+    overflow: hidden; flex-shrink: 0; }
+  .seg .opt { padding: 6px 14px; font-size: 12px; font-weight: 600;
+    color: var(--dim); cursor: pointer; letter-spacing: 0.5px;
+    text-transform: uppercase; transition: background 0.12s, color 0.12s; }
+  .seg .opt.sel { background: var(--accent); color: var(--white); }
+  .seg .opt:not(.sel):hover { color: var(--white); }
   #toast { position: fixed; bottom: 24px; left: 50%; transform: translateX(-50%);
     padding: 10px 18px; background: var(--card); border: 1px solid var(--sep);
     border-radius: 4px; font-size: 13px; opacity: 0; transition: opacity 0.2s;
@@ -340,6 +357,21 @@ function makeToggle(section, item, value) {
   t.onclick = () => postConfig(section, item.key, value ? 0 : 1);
   return t;
 }
+function makeChoice(section, item, value) {
+  // Segmented switch for string choices (e.g. display_mode: hud / cam).
+  // No-ops when the user taps the already-selected option so we avoid a
+  // pointless POST round-trip.
+  const seg = document.createElement("div");
+  seg.className = "seg";
+  for (const choice of (item.choices || [])) {
+    const opt = document.createElement("div");
+    opt.className = "opt" + (choice === value ? " sel" : "");
+    opt.textContent = choice;
+    opt.onclick = () => { if (choice !== value) postConfig(section, item.key, choice); };
+    seg.appendChild(opt);
+  }
+  return seg;
+}
 function renderSettingItem(section, item, value) {
   const row = document.createElement("div");
   row.className = "setting";
@@ -348,6 +380,7 @@ function renderSettingItem(section, item, value) {
   if (item.desc) { const d = document.createElement("div"); d.className = "d"; d.textContent = item.desc; meta.appendChild(d); }
   row.appendChild(meta);
   if (item.kind === "toggle") row.appendChild(makeToggle(section, item, value));
+  else if (item.kind === "choice") row.appendChild(makeChoice(section, item, value));
   return row;
 }
 function renderUpdateBanner(upd) {
@@ -467,11 +500,12 @@ class _Handler(BaseHTTPRequestHandler):
 
 
 # Dispatch table for user-editable settings. Anything else hitting
-# /api/config is rejected. region/night_mode/display_mode/npu_enabled
-# changed callbacks remain wired in hud_live.py for internal runtime
-# updates -- they're just no longer reachable from the dashboard.
+# /api/config is rejected. region/night_mode/npu_enabled changed callbacks
+# remain wired in hud_live.py for internal runtime updates -- they're just
+# not reachable from the dashboard.
 _CALLBACK_MAP = {
     ("settings", "mirror_display"): "on_mirror_change",
+    ("settings", "display_mode"):   "on_display_mode_change",
 }
 
 
