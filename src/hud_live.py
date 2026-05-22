@@ -16,11 +16,12 @@ import time
 import fcntl
 import termios
 import signal
+import traceback
 
 from framebuffer import Framebuffer, FB_DEV, FB_W, FB_H
 from hud_renderer import (
-    render_hud, HUDState, draw_menu_icon,
-    COL_BG, COL_DIM,
+    render_hud, HUDState,
+    COL_BG,
 )
 from ipc_writer import (
     NPU_DETECT_FILE, NPU_POLL_INTERVAL,
@@ -189,7 +190,7 @@ def open_serial(device="/dev/ttyS4", baudrate=9600):
     attrs[2] = termios.CS8 | termios.CREAD | termios.CLOCAL  # cflag
     attrs[3] = 0  # lflag
     attrs[6][termios.VMIN] = 0
-    attrs[6][termios.VTIME] = 1  # 100ms timeout (fast loop for touch polling)
+    attrs[6][termios.VTIME] = 1  # 100ms read timeout
 
     termios.tcsetattr(fd, termios.TCSANOW, attrs)
     flags = fcntl.fcntl(fd, fcntl.F_GETFL)
@@ -198,8 +199,12 @@ def open_serial(device="/dev/ttyS4", baudrate=9600):
 
 
 def open_serial_retry(device="/dev/ttyS4", baudrate=9600,
-                      retries=10, retry_delay=2):
-    """Open serial with retry for boot-time race conditions."""
+                      retries=3, retry_delay=2):
+    """Open serial with retry for boot-time race conditions.
+
+    3x2s cap: longer waits stall the HUD render loop after restart.
+    If the port doesn't come back in 6s we let the HUD draw without GPS.
+    """
     for attempt in range(1, retries + 1):
         try:
             return open_serial(device, baudrate)
@@ -590,9 +595,18 @@ def main():
         print("[FB] FATAL: framebuffer not available, cannot render HUD")
         # Still try to run (process watchdog will restart us)
 
-    gps_fd = open_serial_retry(device, baudrate)
+    # Early paint: replace splash with baseline HUD before any blocking I/O
+    # (serial up to 6s) so the screen isn't stuck.
     gps = GPSState()
     detect = DetectionState()
+    hud_state = HUDState()
+    try:
+        render_hud(fb, gps, hud_state, detect, region_mgr.default_limit)
+    except Exception as _e:
+        print(f"[BOOT] early HUD paint failed: {_e}")
+        traceback.print_exc()
+
+    gps_fd = open_serial_retry(device, baudrate)
 
     # Production defaults -- not user-configurable. CAM mode + NPU-off
     # only exist for developer debugging via direct edits.
@@ -630,11 +644,11 @@ def main():
     }
 
     nmea_buf = b""
-    hud_state = HUDState()
+    # hud_state constructed earlier for the boot-time pre-serial paint.
 
     # --- Shared config-change callbacks ---
-    # Defined here so both the (optional) touch settings UI and the web
-    # config server can dispatch the same actions when a setting changes.
+    # Defined here so the web config server can dispatch the same actions
+    # when a setting changes.
     def _on_npu_toggle(enabled):
         write_npu_enable_ipc(enabled)
         detect.npu_enabled = enabled
@@ -682,33 +696,9 @@ def main():
                 pass
         print(f"[ISP] Night mode: {'ON' if enabled else 'OFF'}")
 
-    # --- Touch input + Settings UI (optional, graceful fallback) ---
-    touch = None
-    settings_ui = None
-    try:
-        from touch_input import TouchInput
-        from settings_ui import SettingsUI
-        touch = TouchInput()
-        if touch.available:
-            settings_ui = SettingsUI(fb, config, region_mgr, app_version=APP_VERSION)
-            settings_ui.on_npu_toggle = _on_npu_toggle
-            settings_ui.on_region_change = _on_region_change
-            settings_ui.on_fusion_reload = _on_fusion_reload
-            settings_ui.on_display_mode_change = _on_display_mode_change
-            settings_ui.on_mirror_change = _on_mirror_change
-            settings_ui.on_night_mode_change = _on_night_mode_change
-            print(f"Touch: enabled (GT911 @ 0x{touch._addr:02X})")
-        else:
-            touch = None
-            print("Touch: no device found, settings UI disabled")
-    except ImportError:
-        print("Touch: modules not available, settings UI disabled")
-    except Exception as e:
-        print(f"Touch: init failed ({e}), settings UI disabled")
-
     # --- Web config server (optional, graceful fallback) ---
     # Provides a PC-side HTML UI over USB via `adb forward tcp:8080 tcp:8080`.
-    # Independent of touch -- runs whether or not GT911 is present.
+    # Replaces the removed GT911 touch settings UI (firmware-stall bug).
     web_server = None
     if config is not None:
         try:
@@ -786,8 +776,6 @@ def main():
     except OSError:
         pass
 
-    settings_close_time = 0  # debounce: prevent accidental re-open
-
     # --- Night-mode auto-switch state ---
     # Drives day/night purely from GPS UTC time + (lat, lon); recomputed on
     # every RMC fix (~1 Hz) but only writes the IPC when the decision
@@ -830,64 +818,14 @@ def main():
     try:
         while not _shutdown_requested:
           try:
-            # --- Poll touch events (non-blocking) ---
-            if touch and settings_ui:
-                was_active = settings_ui.active
-                try:
-                    for ev in touch.poll():
-                        # Mirror touch x-coordinate when display is mirrored,
-                        # so tap targets match the visually flipped layout.
-                        # Settings UI disables mirror during render, but the
-                        # touch zone must still be mirrored when settings is
-                        # not active (HUD is mirrored on screen).
-                        if mirror_enabled and not settings_ui.active:
-                            ev.x = FB_W - 1 - ev.x
-                        if settings_ui.active:
-                            try:
-                                settings_ui.handle_touch(ev)
-                            except Exception as e:
-                                print(f"\n[SETTINGS] handle_touch error: {e}")
-                        else:
-                            # Debounce: skip taps shortly after settings closed
-                            if settings_close_time and (
-                                    time.time() - settings_close_time < 0.5):
-                                continue
-                            # Tap top-left corner (0,0)-(80,80) -> open settings
-                            if (ev.gesture == "tap"
-                                    and ev.x < 80 and ev.y < 80):
-                                settings_ui.activate()
-                except Exception as e:
-                    print(f"\n[TOUCH] poll error: {e}")
-                # Settings inactivity timeout (auto-close if touch dies)
-                if settings_ui.active and settings_ui.check_timeout():
-                    was_active = True  # force display restore below
-
-                # Exiting settings: immediately restore display
-                if was_active and not settings_ui.active:
-                    print("[settings] closed, restoring display")
-                    settings_close_time = time.time()
-                    if config:
-                        display_mode = config.get_str("settings", "display_mode")
-                    if display_mode == "cam":
-                        # Full clear removes settings UI; C binary
-                        # resumes camera on the next frame.
-                        fb.clear(COL_BG)
-                        draw_menu_icon(fb, 18, 18, COL_DIM)
-                        fb.flush()
-                    else:
-                        # Immediate HUD render (don't wait for GPS cycle)
-                        hud_state.base_layer = None
-                        _render_hud()
-
             # --- GPS read (skip if GPS unavailable) ---
             if gps_fd < 0:
                 time.sleep(0.1)
                 detect.poll()
                 write_heartbeat()
                 # Still render HUD without GPS data
-                if not (settings_ui and settings_ui.active):
-                    if display_mode != "cam":
-                        _render_hud()
+                if display_mode != "cam":
+                    _render_hud()
                 continue
 
             try:
@@ -998,16 +936,9 @@ def main():
                     # Lost GPS fix -- reset fusion state
                     speed_fusion.reset()
 
-                # Render: settings overlay > CAM mode gear > full HUD
-                if settings_ui and settings_ui.active:
-                    pass  # settings_ui renders itself on touch events
-                elif display_mode == "cam":
-                    # CAM mode: C binary renders full-screen camera.
-                    # Only draw gear icon in the reserved top-left corner.
-                    fb.fill_rect(0, 0, 40, 40, COL_BG)
-                    draw_menu_icon(fb, 18, 18, COL_DIM)
-                    fb.flush_rect(0, 0, 40, 40)
-                else:
+                # Render: CAM mode lets C binary draw full-screen camera
+                # (no Python overlay); HUD mode renders the full HUD.
+                if display_mode != "cam":
                     _render_hud()
 
                 spd = gps.speed_kmh if gps.valid else 0.0
@@ -1038,12 +969,6 @@ def main():
         if web_server is not None:
             try:
                 web_server.stop()
-            except Exception:
-                pass
-        # Close touch input
-        if touch:
-            try:
-                touch.close()
             except Exception:
                 pass
         # Clear screen to black on exit

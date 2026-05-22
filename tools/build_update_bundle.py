@@ -39,9 +39,9 @@ MANIFEST_SCHEMA = 1
 # has landed, so the on-device version.txt rewrites only happen if
 # every previous push succeeded.
 FILE_MAP = [
-    # Python source (every .py from src/ except the touch UI which is
-    # dead on devices with broken GT911 -- we still ship it for the day
-    # a working module replaces the broken one).
+    # Python source. GT911 touch UI was removed 2026-05-22 in favour of
+    # the web config server (touch_input.py + settings_ui.py no longer
+    # exist in src/).
     ("src/hud_live.py",       "/root/hud_live.py",         "0644"),
     ("src/web_config.py",     "/root/web_config.py",       "0644"),
     ("src/config_manager.py", "/root/config_manager.py",   "0644"),
@@ -52,8 +52,6 @@ FILE_MAP = [
     ("src/db_signer.py",      "/root/db_signer.py",        "0644"),
     ("src/sun.py",            "/root/sun.py",              "0644"),
     ("src/usb_netd.py",       "/root/usb_netd.py",         "0644"),
-    ("src/touch_input.py",    "/root/touch_input.py",      "0644"),
-    ("src/settings_ui.py",    "/root/settings_ui.py",      "0644"),
     ("src/gps_reader.py",     "/root/gps_reader.py",       "0644"),
 
     # Offline speed / camera databases. AU + CN; both regions ship so
@@ -97,6 +95,10 @@ POST_DEPLOY = [
     # freshness checks can be wrong.
     "find /root -name '__pycache__' -type d -exec rm -rf {} + 2>/dev/null; true",
     "find /root -name '*.pyc' -exec rm {} \\; 2>/dev/null; true",
+    # Remove files no longer shipped after 2026-05-22 touch UI cleanup.
+    # Bundle pushes are incremental, so old files linger on disk -- harmless
+    # (hud_live.py no longer imports them) but worth removing for hygiene.
+    "rm -f /root/touch_input.py /root/settings_ui.py 2>/dev/null; true",
     # Reboot rather than service-restart. S99_ai_hud spawns watchdog
     # subshells with `&`, and adb-shell semantics SIGHUP everything in
     # the session when the shell exits -- even nohup'd children get

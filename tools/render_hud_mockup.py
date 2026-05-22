@@ -50,7 +50,6 @@ COL_LIMIT_RING = (215, 40, 40)
 COL_LIMIT_BG = (252, 252, 255)
 COL_LIMIT_TEXT = (20, 20, 25)
 COL_AMBER = (255, 185, 35)
-COL_GEAR = (55, 60, 75)
 
 # ---------------------------------------------------------------------------
 # Font helpers
@@ -92,15 +91,6 @@ def draw_speed_sign(draw, cx, cy, r, limit, fonts):
     tw, th = bbox[2] - bbox[0], bbox[3] - bbox[1]
     draw.text((cx - tw//2 - bbox[0], cy - th//2 - bbox[1]),
               text, fill=COL_LIMIT_TEXT, font=font)
-
-
-def draw_menu_icon(draw, cx, cy, color):
-    """Draw a hamburger menu icon (three horizontal lines)."""
-    lw, lh = 16, 2
-    x0 = cx - lw // 2
-    draw.rectangle([x0, cy-8, x0+lw, cy-6], fill=color)
-    draw.rectangle([x0, cy-2, x0+lw, cy], fill=color)
-    draw.rectangle([x0, cy+4, x0+lw, cy+6], fill=color)
 
 
 def draw_alert_bar(draw, text, color, fonts):
@@ -233,9 +223,6 @@ def render_hud(speed, limit, over_limit, camera_ahead,
     dot_y = FB_H - 40 + (sbbox[3] - sbbox[1]) // 2
     dot_color = COL_GREEN if gps_valid else COL_RED
     draw.ellipse([dot_x-4, dot_y-4, dot_x+4, dot_y+4], fill=dot_color)
-
-    # --- Gear icon (settings entry, top-left) ---
-    draw_menu_icon(draw, 18, 18, COL_GEAR)
 
     return img
 

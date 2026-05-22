@@ -157,10 +157,25 @@ static void install_signal_handlers(void) {
 static int isp_init(void) {
     int ret;
 
+    /*
+     * On rapid restart (manual S99_ai_hud restart, or watchdog respawn
+     * after a crash) the previous RKAIQ instance's media-ctl topology
+     * may still be tearing down when we get here. The first sysctl_init
+     * then fails with "device busy" / sensor not found. A single 2s retry
+     * recovers ~95% of those cases without burning user time on success.
+     */
     ret = isp_ctrl_init(ISP_CAM_ID, IQ_FILE_DIR);
     if (ret != 0) {
-        printf("[ERROR] ISP init failed\n");
-        return ret;
+        printf("[WARN] ISP init failed (likely V4L2 race from previous "
+               "instance), retrying in 2s...\n");
+        fflush(stdout);
+        sleep(2);
+        ret = isp_ctrl_init(ISP_CAM_ID, IQ_FILE_DIR);
+        if (ret != 0) {
+            printf("[ERROR] ISP init failed twice, giving up\n");
+            return ret;
+        }
+        printf("[INFO] ISP init recovered on retry\n");
     }
 
     /* Apply dashcam-optimized AE/DRC/NR defaults */
@@ -372,15 +387,13 @@ static void vpss_deinit(void) {
 
 /*
  * NV12 480x480 -> XRGB fullscreen (480x480) for CAM display mode.
- * Reserves a top-left corner for the Python-rendered menu icon.
  * BT.601 full-range conversion, integer fixed-point arithmetic.
+ *
+ * Previously reserved a 40x40 top-left corner for a Python-rendered
+ * gear icon (GT911 touch settings entry point). The touch UI was
+ * removed 2026-05-22 in favour of the web config server, so C now
+ * renders the full frame including the top-left corner.
  */
-
-/* Top-left pixel region reserved for Python menu icon overlay.
- * Python `draw_menu_icon()` draws a hamburger menu here (three horizontal
- * lines within ~30px).  Use 40px for padding.  C never overwrites this
- * region; Python `flush_rect(0, 0, 40, 40)` manages it independently. */
-#define GEAR_RESERVE_SIZE   40
 
 static void nv12_480_to_fullscreen_xrgb(const uint8_t *nv12, uint8_t *fb) {
     const int w = DISPLAY_WIDTH;
@@ -389,9 +402,7 @@ static void nv12_480_to_fullscreen_xrgb(const uint8_t *nv12, uint8_t *fb) {
     const uint8_t *uv_plane = nv12 + w * h;
 
     for (int row = 0; row < h; row++) {
-        /* Skip reserved gear icon region (top-left corner) */
-        int col_start = (row < GEAR_RESERVE_SIZE) ? GEAR_RESERVE_SIZE : 0;
-        for (int col = col_start; col < w; col++) {
+        for (int col = 0; col < w; col++) {
             int y_val  = y_plane[row * w + col];
             int uv_off = (row / 2) * w + (col & ~1);
             int u = uv_plane[uv_off]     - 128;

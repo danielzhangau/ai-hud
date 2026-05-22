@@ -104,19 +104,6 @@ class HUDState:
         self.limit_low_confidence = False
 
 
-def draw_menu_icon(fb, cx, cy, color):
-    """Draw a hamburger menu icon (three horizontal lines).
-
-    16px wide, three 2px-tall lines spaced 6px apart, centered at (cx, cy).
-    Universal 'open menu/settings' symbol, pixel-perfect on bitmap display.
-    """
-    lw, lh = 16, 2
-    x0 = cx - lw // 2
-    fb.fill_rect(x0, cy - 7, lw, lh, color)
-    fb.fill_rect(x0, cy - 1, lw, lh, color)
-    fb.fill_rect(x0, cy + 5, lw, lh, color)
-
-
 def render_hud(fb, gps, state, detect, default_speed_limit):
     """Render the full HUD frame - mockup v3 style.
 
@@ -299,8 +286,5 @@ def render_hud(fb, gps, state, detect, default_speed_limit):
     dot_y = sat_y + GLYPH_H // 2
     dot_color = COL_GREEN if gps.valid else COL_RED
     fb.fill_circle(dot_x, dot_y, 4, dot_color)
-
-    # --- Settings gear icon (top-left tap zone indicator) ---
-    draw_menu_icon(fb, 18, 18, COL_DIM)
 
     fb.flush()
