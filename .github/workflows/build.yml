@@ -13,7 +13,7 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Install cross-compilation toolchain
         run: |
@@ -40,7 +40,7 @@ jobs:
           python3 generate_splash.py
 
       - name: Upload mockups
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: hud-mockups
           path: mockups/*.png

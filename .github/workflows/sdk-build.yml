@@ -50,7 +50,7 @@ jobs:
 
       # ---- Checkout this repository ----
       - name: Checkout repository
-        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5
 
       # ---- Install SDK build dependencies ----
       - name: Install build dependencies
@@ -200,7 +200,7 @@ jobs:
       # ---- Upload firmware artifacts ----
       - name: Upload firmware artifacts
         if: success()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
+        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4  # v5
         with:
           name: ${{ steps.set-artifact-name.outputs.name }}
           path: luckfox-pico/output/image/

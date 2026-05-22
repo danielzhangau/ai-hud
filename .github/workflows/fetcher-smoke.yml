@@ -69,7 +69,7 @@ jobs:
           - { name: qld, module: au_qld, min: 50000,   max: 250000,  limit: "--limit 200000" }
     name: ${{ matrix.name }}
     steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5
 
       - name: Set up Python
         run: python3 -V
