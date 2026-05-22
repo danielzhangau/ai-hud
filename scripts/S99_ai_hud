@@ -46,11 +46,19 @@ CRASH_BURST_THRESHOLD=5
 CRASH_BURST_WINDOW=30
 BACKOFF_DELAY=60
 
-# System watchdog: reboot if Python heartbeat stale for this long
+# System watchdog: reboot if Python heartbeat stale for this long.
+# Timeout was 90s but that's aggressive on a 1.2GHz ARM A7 -- a GC pause,
+# touch I2C stall, or RKAIQ ISP reconfigure can legitimately stall the
+# render loop for tens of seconds. 150s gives Python a real recovery
+# window before we kick the box.
 HEARTBEAT_FILE="/tmp/ai_hud_heartbeat"
-HEARTBEAT_TIMEOUT=90    # seconds before considering app hung
-HEARTBEAT_CHECK=10      # check interval (seconds)
-HEARTBEAT_GRACE=120     # grace period after boot before checking
+HEARTBEAT_TIMEOUT=150
+HEARTBEAT_CHECK=10
+HEARTBEAT_GRACE=120
+
+# Persisted across reboots so the next boot can log why we restarted.
+# Lives on /userdata (separate ext4 partition) -- survives rootfs fsck.
+REBOOT_REASON_FILE="/userdata/last_reboot_reason.txt"
 
 # Ensure RKMPI libraries are in the search path (init.d may not inherit profile)
 export LD_LIBRARY_PATH="/oem/usr/lib:/oem/lib:${LD_LIBRARY_PATH}"
@@ -90,6 +98,25 @@ cleanup_ipc_files() {
     rm -f /tmp/ai_hud_ready /tmp/ai_hud_detect /tmp/ai_hud_speed \
           /tmp/ai_hud_npu_enable /tmp/ai_hud_gps /tmp/ai_hud_display_mode \
           /tmp/ai_hud_pip_hide /tmp/ai_hud_heartbeat /tmp/ai_hud_isp_config
+}
+
+# Poll-wait for ALL given pids to exit, up to timeout seconds.
+# Returns 0 if all exited, 1 if any still alive after timeout.
+# 固定 sleep 2 后 SIGKILL 会打死还在释放 ISP/VPSS/V4L2 的进程，导致下次
+# 启动撞到 device busy。所以这里 TERM 后并行 poll，能等就多等。
+wait_for_pids_exit() {
+    _timeout="$1"; shift
+    _elapsed=0
+    while [ "$_elapsed" -lt "$_timeout" ]; do
+        _alive=0
+        for _p in "$@"; do
+            [ -n "$_p" ] && [ -d "/proc/$_p" ] && _alive=1
+        done
+        [ "$_alive" = "0" ] && return 0
+        sleep 1
+        _elapsed=$((_elapsed + 1))
+    done
+    return 1
 }
 
 kill_display_blockers() {
@@ -183,6 +210,10 @@ watchdog_c() {
             _model="$AI_HUD_MODEL_FALLBACK"
         fi
 
+        # If ai-hud dies < 5s in, it's almost certainly an ISP/V4L2 race
+        # from the previous instance -- needs longer settle than runtime crash.
+        _start_ts=$(date +%s)
+
         if [ -x "$AI_HUD" ] && [ -n "$_model" ]; then
             "$AI_HUD" --model "$_model" >> "$LOGFILE_C" 2>&1 &
             _pid=$!
@@ -202,8 +233,17 @@ watchdog_c() {
             continue
         fi
         _exit=$?
+        _run_dur=$(( $(date +%s) - _start_ts ))
         set -- $(crash_backoff "ai-hud" "$_crash_count" "$_last_crash_ts")
         _crash_count="$1"; _last_crash_ts="$2"; _delay="$3"
+
+        # Short-lifetime crash -> bump delay so V4L2/MIPI can finish releasing.
+        # Skip if backoff already raised delay above 8s.
+        if [ "$_run_dur" -lt 5 ] && [ "$_delay" -lt 8 ]; then
+            _delay=8
+            log "ai-hud died after ${_run_dur}s (likely ISP init race), using ${_delay}s settle"
+        fi
+
         log "ai-hud exited with code $_exit, restarting in ${_delay}s"
         rotate_log "$LOGFILE_C"
         sleep "$_delay"
@@ -234,6 +274,58 @@ watchdog_py() {
     done
 }
 
+# Capture process snapshot for the next-boot forensic log, then attempt
+# a clean reboot, falling back to forced reboot if init doesn't shut down
+# in time. Without CONFIG_MAGIC_SYSRQ + hardware watchdog there is no
+# safety net beyond `reboot -f`; if the kernel reset path itself is wedged
+# (e.g. RKAIQ holding ISP/MIPI locks during machine_restart), only a
+# physical power-cycle recovers. P0 follow-up is to enable DW_WATCHDOG.
+trigger_watchdog_reboot() {
+    _heartbeat_age="$1"
+    _c_pid=$(pidof ai-hud 2>/dev/null)
+    _py_pid=$(pidof python3 2>/dev/null)
+
+    log "WATCHDOG: heartbeat stale ${_heartbeat_age}s (threshold=${HEARTBEAT_TIMEOUT}s)"
+    log "WATCHDOG: snapshot ai-hud=${_c_pid:-none} python3=${_py_pid:-none}"
+
+    # Forensic trail for the NEXT boot.   We write this BEFORE rebooting
+    # so a `reboot -f` that succeeds still leaves the reason on disk.
+    # /userdata is a separate ext4 partition; survives rootfs fsck.
+    {
+        echo "ts=$(date +%s)"
+        echo "wall=$(date '+%Y-%m-%d %H:%M:%S')"
+        echo "trigger=heartbeat_stale"
+        echo "heartbeat_age=${_heartbeat_age}"
+        echo "threshold=${HEARTBEAT_TIMEOUT}"
+        echo "ai_hud_pid=${_c_pid:-none}"
+        echo "py_pid=${_py_pid:-none}"
+        # Capture top 5 cpu hogs (best-effort; ps may be slow under hang).
+        ps 2>/dev/null | head -6
+    } > "$REBOOT_REASON_FILE" 2>/dev/null
+    sync   # flush both the reason file and pending HUD logs
+
+    # Phase 1 -- graceful: SIGTERM init -> rcK -> umount.  Init runs
+    # ::shutdown lines from /etc/inittab.  5s budget: enough for a clean
+    # exit, short enough that we still recover if rcK hangs on stop().
+    log "WATCHDOG: graceful reboot (5s budget)"
+    reboot &
+    _reboot_helper=$!
+    sleep 5
+
+    # Phase 2 -- forced: if init didn't shut us down, fall through to the
+    # kernel reboot syscall directly.  This skips umount but the journal
+    # has been sync'd, so rootfs comes back clean on next boot.
+    if [ -d "/proc/$$" ]; then
+        log "WATCHDOG: graceful reboot did not take, forcing"
+        sync
+        reboot -f
+    fi
+    # Reached only if both reboot calls failed.   Loop forever so the
+    # watchdog process doesn't exit (and respawn worker traffic) on a
+    # device that's already in a bad state -- physical reset needed.
+    while true; do sleep 60; done
+}
+
 # System-level watchdog: reboot device if Python heartbeat goes stale.
 # Catches application-level deadlocks where processes don't crash but
 # stop responding (e.g., RKMPI driver hang, Python GIL deadlock).
@@ -253,11 +345,7 @@ system_watchdog() {
         _age=$(( _now - _hb_ts ))
 
         if [ "$_age" -gt "$HEARTBEAT_TIMEOUT" ]; then
-            log "WATCHDOG: heartbeat stale for ${_age}s (threshold=${HEARTBEAT_TIMEOUT}s), rebooting!"
-            sync
-            sleep 1
-            reboot -f
-            sleep 30  # should not reach here
+            trigger_watchdog_reboot "$_age"
         fi
 
         # Piggyback periodic log rotation onto this 10s heartbeat loop.
@@ -271,13 +359,39 @@ system_watchdog() {
     done
 }
 
+# If the previous boot ended via watchdog reboot, surface why. Read,
+# log, and move aside so we keep at most one historical record on disk.
+log_last_reboot_reason() {
+    [ -f "$REBOOT_REASON_FILE" ] || return 0
+    log "===== Previous boot ended via watchdog reboot ====="
+    while IFS= read -r _line; do
+        log "  $_line"
+    done < "$REBOOT_REASON_FILE"
+    # Archive (not delete) so a sequence of bad boots can be inspected
+    # via /userdata/last_reboot_reason.txt.prev.
+    mv -f "$REBOOT_REASON_FILE" "${REBOOT_REASON_FILE}.prev" 2>/dev/null
+}
+
+# pkill workers by name with graceful TERM + settle + KILL. Cheap no-op
+# when nothing is running, so it's safe to call as a defensive cleanup
+# step. Used by both stop() (orphan fallback) and start() (residue
+# handling on manual hot-start).
+pkill_workers_orphan() {
+    pgrep -f "ai-hud" > /dev/null 2>&1 || pgrep -f "hud_live.py" > /dev/null 2>&1 || return 0
+    log "WARN: orphan worker(s) detected, cleaning up"
+    pkill -TERM -f "ai-hud" 2>/dev/null
+    pkill -TERM -f "hud_live.py" 2>/dev/null
+    sleep 2  # kernel V4L2/MIPI/ISP release window
+    pkill -KILL -f "ai-hud" 2>/dev/null
+    pkill -KILL -f "hud_live.py" 2>/dev/null
+}
+
 start() {
     log "===== START ====="
 
-    # 1. Kill leftover watchdogs FIRST so they can't respawn children during
-    #    the cleanup below. The watchdog subshells are forked via `&` and
-    #    inherit the parent's cmdline ("/bin/sh /etc/init.d/S99_ai_hud start"),
-    #    so safe_kill must match against "S99_ai_hud" (NOT "watchdog").
+    # 1. Kill leftover watchdogs first so they can't respawn workers
+    #    during the cleanup below. Watchdog subshells inherit the parent
+    #    init.d cmdline, so safe_kill matches "S99_ai_hud" (NOT "watchdog").
     safe_kill "$WATCHDOG_SYS_PID" "S99_ai_hud" TERM
     safe_kill "$WATCHDOG_C_PID" "S99_ai_hud" TERM
     safe_kill "$WATCHDOG_PY_PID" "S99_ai_hud" TERM
@@ -286,38 +400,33 @@ start() {
     safe_kill "$WATCHDOG_C_PID" "S99_ai_hud" KILL
     safe_kill "$WATCHDOG_PY_PID" "S99_ai_hud" KILL
 
-    # 2. Then kill leftover worker processes (no longer auto-respawned).
-    pkill -f "ai-hud" 2>/dev/null
-    pkill -f "hud_live.py" 2>/dev/null
+    # 2. Defensive worker residue cleanup. In the restart/cold-boot path
+    #    stop() (or buildroot) already cleaned everything, so pgrep
+    #    returns no match and we pay zero seconds. The sleep only fires
+    #    if a manual hot-start finds live workers.
+    pkill_workers_orphan
 
     rm -f "$AI_HUD_PIDFILE" "$HUD_PY_PIDFILE"
     rm -f "$WATCHDOG_C_PID" "$WATCHDOG_PY_PID" "$WATCHDOG_SYS_PID"
     cleanup_ipc_files
-    sleep 1
 
-    # Rotate logs before starting
     rotate_log "$LOGFILE"
     rotate_log "$LOGFILE_C"
-
-    # Clear stale Python bytecode (no RTC on device)
+    log_last_reboot_reason
     clear_pyc
-
-    # Make sure display-blocking processes are stopped first
     kill_display_blockers
 
-    # Splash already displayed by S01_ai_hud_splash; refresh if needed
+    # Paint splash now: covers any half-frame left by a crashed worker
+    # and stays on screen until Python's first render replaces it.
     show_splash
 
-    # Launch watchdog for C binary (camera + NPU)
     watchdog_c &
     echo $! > "$WATCHDOG_C_PID"
-    sleep 2  # Wait for camera pipeline to initialize
+    sleep 2  # let ai-hud bring up VI/VPSS before Python opens fb0
 
-    # Launch watchdog for Python HUD
     watchdog_py &
     echo $! > "$WATCHDOG_PY_PID"
 
-    # Launch system watchdog (heartbeat monitor -> reboot on hang)
     system_watchdog &
     echo $! > "$WATCHDOG_SYS_PID"
 
@@ -327,7 +436,7 @@ start() {
 stop() {
     log "===== STOP ====="
 
-    # 1. Stop watchdog loops first (prevent respawn during shutdown)
+    # 1. Stop watchdog loops first (prevent respawn during shutdown).
     safe_kill "$WATCHDOG_SYS_PID" "S99_ai_hud" TERM
     safe_kill "$WATCHDOG_C_PID" "S99_ai_hud" TERM
     safe_kill "$WATCHDOG_PY_PID" "S99_ai_hud" TERM
@@ -337,31 +446,42 @@ stop() {
     safe_kill "$WATCHDOG_PY_PID" "S99_ai_hud" KILL
     rm -f "$WATCHDOG_C_PID" "$WATCHDOG_PY_PID" "$WATCHDOG_SYS_PID"
 
-    # 2. Graceful SIGTERM to worker processes
+    # 2. TERM both workers in parallel then poll-wait both at once.
+    #    Serial graceful-stop would burn 4s+6s = 10s; parallel caps at
+    #    max(4,6) = 6s. The workers are independent so this is safe.
+    _py_pid=$(cat "$HUD_PY_PIDFILE" 2>/dev/null)
+    _c_pid=$(cat "$AI_HUD_PIDFILE" 2>/dev/null)
     safe_kill "$HUD_PY_PIDFILE" "hud_live" TERM
     safe_kill "$AI_HUD_PIDFILE" "ai-hud" TERM
-    sleep 2  # Give RKMPI time to clean up
+    if wait_for_pids_exit 6 "$_py_pid" "$_c_pid"; then
+        log "workers exited cleanly"
+    else
+        log "WARN: worker(s) did not exit in 6s, SIGKILL"
+        safe_kill "$HUD_PY_PIDFILE" "hud_live" KILL
+        safe_kill "$AI_HUD_PIDFILE" "ai-hud" KILL
+        sleep 1  # kernel reap window after KILL
+    fi
 
-    # 3. Force kill if still alive
-    safe_kill "$HUD_PY_PIDFILE" "hud_live" KILL
-    safe_kill "$AI_HUD_PIDFILE" "ai-hud" KILL
-
-    # 4. Fallback: kill by name (catches orphaned processes)
-    pkill -f "hud_live.py" 2>/dev/null
-    pkill -f "ai-hud" 2>/dev/null
+    # 3. Orphan fallback for processes not tracked by pidfile.
+    pkill_workers_orphan
 
     rm -f "$AI_HUD_PIDFILE" "$HUD_PY_PIDFILE"
-
     cleanup_ipc_files
 
-    # Clear the framebuffer to black
-    clear_screen
+    # 4. Kernel V4L2/MIPI/ISP char devices need time to fully release
+    #    after the last close; without this margin a back-to-back
+    #    start() hits "device busy" on VI EnableDev / sysctl_init.
+    sleep 2
+
     log "Stopped"
 }
 
 restart() {
     stop
-    sleep 1
+    # Repaint splash so the user sees the brand image instead of stale
+    # frame or black while start() initializes. stop() intentionally
+    # leaves fb0 alone -- visual policy is the caller's responsibility.
+    show_splash
     start
 }
 
@@ -371,6 +491,7 @@ case "$1" in
         ;;
     stop)
         stop
+        clear_screen
         ;;
     restart)
         restart

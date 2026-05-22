@@ -41,7 +41,9 @@ class Framebuffer:
             cls._pixel_cache[color] = p
         return p
 
-    def __init__(self, device=FB_DEV, retries=10, retry_delay=2):
+    def __init__(self, device=FB_DEV, retries=3, retry_delay=1):
+        # 3x1s caps boot delay to 3s; kernel releases fb0 as soon as the
+        # previous process is fully gone, so longer retries just stall startup.
         self.fd = -1
         self.buf = bytearray(FB_STRIDE * FB_H)
         self.mirror = False  # horizontal flip for HUD windshield reflection
