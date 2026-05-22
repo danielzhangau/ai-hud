@@ -64,7 +64,7 @@ jobs:
 
       # Pull the firmware images produced by the build job.
       - name: Download firmware artifact
-        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0  # v5
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131  # v7
         with:
           name: ${{ needs.build.outputs.artifact-name }}
           path: firmware
@@ -183,7 +183,7 @@ jobs:
       # Publish the GitHub Release. The action creates the release if missing
       # or updates it (additive on assets) if the tag already has one.
       - name: Publish GitHub Release
-        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65  # v2
+        uses: softprops/action-gh-release@b4309332981a82ec1c5618f44dd2e27cc8bfbfda  # v3
         with:
           tag_name: ${{ github.ref_name }}
           name: "AI-HUD ${{ github.ref_name }}"

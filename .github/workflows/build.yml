@@ -40,7 +40,7 @@ jobs:
           python3 generate_splash.py
 
       - name: Upload mockups
-        uses: actions/upload-artifact@v5
+        uses: actions/upload-artifact@v6
         with:
           name: hud-mockups
           path: mockups/*.png

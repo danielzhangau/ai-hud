@@ -112,7 +112,7 @@ jobs:
 
       # ---- Upload RKNN model artifact ----
       - name: Upload RKNN model
-        uses: actions/upload-artifact@v5
+        uses: actions/upload-artifact@v6
         with:
           name: ${{ env.MODEL_NAME }}_${{ env.PLATFORM }}_rknn
           path: ${{ env.RKNN_MODEL }}
