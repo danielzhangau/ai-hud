@@ -74,7 +74,20 @@ jobs:
       # known-good state without re-running the full SDK build locally.
       # The *.sig sidecars must travel with their .db counterparts --
       # the device loader rejects unsigned DBs (fail-closed).
+      #
+      # We re-sign any .db that arrives without a .sig (or whose .sig
+      # is older than the .db) here in the release job rather than
+      # depending on data/ having every sidecar pre-committed:
+      #   * tools/build_db.py historically only signed zones, not
+      #     cameras -- AU speed_cameras.db has shipped unsigned
+      #   * monthly db-refresh PRs sometimes touch only one region,
+      #     leaving the other region's .sig stale-vs-.db
+      # Signing here with the runtime secret is the same key the
+      # device verifies against, so re-signing is identity-preserving
+      # when an up-to-date .sig already exists.
       - name: Stage speed databases
+        env:
+          AI_HUD_DB_SECRET: ${{ secrets.AI_HUD_DB_SECRET }}
         run: |
           mkdir -p firmware/data
           cp data/speed_zones.db    firmware/data/ 2>/dev/null || true
@@ -85,12 +98,36 @@ jobs:
           cp data/speed_cameras.db.sig   firmware/data/ 2>/dev/null || true
           cp data/speed_zones_cn.db.sig  firmware/data/ 2>/dev/null || true
           cp data/speed_cameras_cn.db.sig firmware/data/ 2>/dev/null || true
+
+          # Sign any .db that has no sidecar (or a stale one). Uses the
+          # same db_signer + load_key() the device verifies with, so a
+          # freshly-signed .sig is bytewise identical to a properly
+          # pre-signed one.
+          python3 - <<'PY'
+          import os, sys
+          from pathlib import Path
+          sys.path.insert(0, "src")
+          import db_signer
+          key = db_signer.load_key()
+          for db in sorted(Path("firmware/data").glob("*.db")):
+              sig = db.with_suffix(db.suffix + ".sig")
+              needs = (not sig.exists()
+                       or sig.stat().st_mtime < db.stat().st_mtime)
+              if needs:
+                  db_signer.sign_file(db, key)
+                  print(f"  signed {db.name} -> {sig.name}")
+              else:
+                  print(f"  ok     {db.name} (sidecar up to date)")
+          PY
+
+          echo "--- firmware/data/ after staging ---"
           ls -la firmware/data/ || true
+
           # Defense-in-depth: refuse to publish a release whose .db
-          # files lack signatures. A missing .sig in production is
-          # always either a build bug or a tampered checkout -- we'd
-          # rather fail the release than ship something the device
-          # will reject silently after install.
+          # files lack signatures. After the sign-in-place pass above
+          # this should never trigger, but we keep it as a tripwire
+          # in case load_key()'s dev fallback writes nothing because
+          # AI_HUD_DB_SECRET failed to plumb through.
           for db in firmware/data/*.db; do
               [ -f "$db" ] || continue
               if [ ! -f "$db.sig" ]; then
