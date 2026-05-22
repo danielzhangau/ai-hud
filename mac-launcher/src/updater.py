@@ -70,6 +70,24 @@ def notify(msg, icon="note"):
     )
 
 
+def progress_notify(msg):
+    """Non-modal banner notification (macOS Notification Center). Doesn't
+    block the updater flow and doesn't require an OK click. Used so the
+    user sees forward progress during the ~30 second download+push+reboot
+    window instead of staring at a frozen launcher (P1, 2026-05-22).
+
+    Silent on error: if the user denied notification permission to
+    osascript, this is a no-op rather than a hard failure.
+    """
+    # Escape double quotes in the message body so the AppleScript
+    # string literal stays well-formed.
+    safe = msg.replace('"', '\\"')
+    _osascript(
+        "-e",
+        f'display notification "{safe}" with title "AI-HUD Updater"',
+    )
+
+
 def confirm_update(current, latest):
     """Ask the user to authorize the update; returns True iff they accept."""
     out = _osascript(
@@ -120,6 +138,32 @@ def _device_version(adb_path):
         if v:
             return v
     return "0.0.0"  # treat missing as ancient so we offer to update
+
+
+def _wait_for_web_server(adb_path, timeout_s=30):
+    """After reboot, wait until hud_live.py's web server answers on
+    device :80. _wait_for_device returns as soon as adb sees the
+    device -- that's just the ADB gadget, not hud_live.py which takes
+    another 10-20 seconds to import its modules and bind :80.
+
+    Polling via `adb shell wget` rather than via the host-side adb
+    forward, because the forward may have been torn down by the reboot
+    and isn't re-bound until launch.sh runs after the updater returns
+    (P2, 2026-05-22).
+    """
+    import time
+    deadline = time.monotonic() + timeout_s
+    while time.monotonic() < deadline:
+        rc, out, _ = _adb(
+            adb_path, "shell",
+            "wget -qO- --timeout=1 http://127.0.0.1/api/state 2>/dev/null "
+            "| head -c 1",
+            timeout=3,
+        )
+        if rc == 0 and out.strip():
+            return True
+        time.sleep(1)
+    return False
 
 
 def _write_device_update_status(adb_path, current, latest, available, url=None):
@@ -193,6 +237,50 @@ def _semver_tuple(v):
     except ValueError:
         # If the string isn't a clean SemVer, fall back to string compare.
         return (-1,)
+
+
+def _version_gap_too_large(current, latest):
+    """Refuse OTA when the version gap is wide enough that OS-layer
+    changes risk leaving the device in an unrecoverable state.
+
+    The OTA bundle only touches application layer: /root/*.py, the
+    ai-hud binary, init scripts, databases. It assumes the kernel and
+    rootfs are compatible. Across a single minor bump (0.1.x -> 0.2.x)
+    that's safe. Across two minor bumps or a major bump the new init
+    scripts (S50usbdevice / S99usbnetd) may reference configfs paths
+    or kernel modules the older rootfs/kernel doesn't expose, which
+    can break the USB gadget and leave a device without ADB.
+
+    Note 2026-05-22: an observed 0.1.0 -> 0.3.0 OTA looked bricked --
+    USB went silent for ~30 min, display stayed black. Eventually it
+    recovered: the boot delay was slow first-boot init (speed-DB
+    HMAC verify on 99 MB of zones, ISP calibration, NPU model load)
+    rather than a true brick. But the user-visible state was
+    indistinguishable from a hard failure during that window. Even if
+    the device usually recovers, "looks bricked for 30 min" is a bad
+    UX for an end user who'll think it's dead and try to force-reset.
+    Combined with the real risk of true bricking on older kernels,
+    conservatism wins -- refuse the OTA and route the user to the
+    full firmware-flash path instead.
+
+    Heuristic: refuse when minor gap > 1, or major differs at all.
+    Returns False on parse failure so we don't block legitimate updates
+    due to an unrecognised version string.
+    """
+    def _major_minor(v):
+        parts = v.lstrip("v").split("-")[0].split(".")
+        try:
+            return (int(parts[0]),
+                    int(parts[1]) if len(parts) > 1 else 0)
+        except (ValueError, IndexError):
+            return None
+    c = _major_minor(current)
+    l = _major_minor(latest)
+    if c is None or l is None:
+        return False
+    if c[0] != l[0]:
+        return True
+    return (l[1] - c[1]) > 1
 
 
 def _sha256(path):
@@ -314,6 +402,24 @@ def main():
         print("[updater] device is up to date")
         return 0
 
+    # 2a. Guardrail: refuse OTA across wide version gaps (P0, 2026-05-22)
+    if _version_gap_too_large(current, latest):
+        print(f"[updater] version gap too large: {current} -> {latest}, "
+              f"refusing OTA")
+        notify(
+            f"This update spans too many versions (v{current} -> v{latest}).\\n\\n"
+            f"OTA can only safely apply small step upgrades — the kernel "
+            f"and USB gadget on your device may not be compatible with the "
+            f"newer application code, and pushing it could brick the device.\\n\\n"
+            f"To upgrade across this many versions, use firmware-flash mode:\\n"
+            f"  1. Unplug USB\\n"
+            f"  2. Hold the BOOT button on the device\\n"
+            f"  3. Plug USB back in, release BOOT after 2 seconds\\n"
+            f"  4. Run this app again — it'll flash the full firmware",
+            "caution",
+        )
+        return 0
+
     # 3. Ask the user
     if not confirm_update(current, latest):
         print("[updater] user skipped")
@@ -326,14 +432,24 @@ def main():
                "Try again later.", "caution")
         return 2
 
-    urls = [gh_url] if gh_url else []
-    for base in _load_mirror_urls(args.script_dir):
-        urls.append(base + name)
+    mirror_urls = [base + name for base in _load_mirror_urls(args.script_dir)]
+    gh_urls = [gh_url] if gh_url else []
+    # Test mode: when AI_HUD_OTA_MIRROR_FIRST=1 (set via launchctl setenv on
+    # macOS) we prepend a localhost mirror and try mirrors before GitHub.
+    # Lets a developer reuse a cached bundle from a local `python3 -m http.server`
+    # instead of redownloading 37 MB from GitHub's CDN on every iteration.
+    # Production users never set the env var -- behaviour is unchanged.
+    if os.environ.get("AI_HUD_OTA_MIRROR_FIRST"):
+        test_url = "http://localhost:8000/" + name
+        urls = [test_url] + mirror_urls + gh_urls
+    else:
+        urls = gh_urls + mirror_urls
     if not urls:
         notify("No download URLs configured.", "stop")
         return 2
 
     # 5. Download (with mirror fallback)
+    progress_notify(f"Downloading update v{latest}...")
     with tempfile.NamedTemporaryFile(suffix=".zip", delete=False) as tmp:
         bundle_path = tmp.name
     try:
@@ -352,6 +468,7 @@ def main():
             return 2
 
         # 6. Push to device
+        progress_notify("Installing files on device...")
         try:
             applied = perform_update(args.adb, bundle_path)
         except Exception as e:
@@ -360,9 +477,36 @@ def main():
                    f"Try running the launcher again.", "stop")
             return 2
 
+        # 7. Verify device actually rebooted with the new version (P3)
+        # _wait_for_device is already called inside perform_update for the
+        # reboot, but it returns as soon as adb sees the device -- before
+        # hud_live.py + web server come up. Wait for the web server too
+        # (P2), then re-read version.txt to confirm the upgrade landed.
+        progress_notify("Waiting for device to finish booting...")
+        web_ok = _wait_for_web_server(args.adb, timeout_s=30)
+        new_ver = _device_version(args.adb)
+        if _semver_tuple(new_ver) < _semver_tuple(latest):
+            notify(
+                f"Update attempted but device still reports v{new_ver} "
+                f"(expected v{latest}).\n\n"
+                f"Some files may not have applied correctly. Check "
+                f"/var/log/ai_hud.log on device.",
+                "caution",
+            )
+            return 2
+        if not web_ok:
+            notify(
+                f"Update to v{applied} applied, but the device web "
+                f"server hasn't come back yet.\n\n"
+                f"Wait a minute and double-click this app again to "
+                f"open the dashboard.",
+                "caution",
+            )
+            return 0
+
         notify(f"Update to v{applied} complete.\n\n"
                f"The dashboard will reload in a moment.")
-        print(f"[updater] update applied: v{applied}")
+        print(f"[updater] update applied: v{applied} (verified)")
         return 0
     finally:
         try:

@@ -130,6 +130,23 @@ if [ -f "$UPDATER" ] && command -v python3 >/dev/null 2>&1; then
     python3 "$UPDATER" --adb "$ADB" --script-dir "$DIR" || true
 fi
 
+# If the updater triggered a reboot the original adb forward got torn
+# down (the device disconnected from USB during reboot). Re-bind it.
+# Idempotent if it's still alive (2026-05-22).
+"$ADB" forward "tcp:${HOST_PORT}" "tcp:${DEVICE_PORT}" >/dev/null 2>&1 || true
+
+# Re-probe the device HTTP server before opening the browser. After an
+# OTA reboot hud_live.py takes 10-20 seconds to come back; without this
+# wait `open ${URL}` hits a connection-refused page in the browser.
+# Window: up to 30 seconds (longer than the bare _wait_for_device the
+# updater already did, to cover hud_live.py's Python import + ISP init).
+for _ in $(seq 1 30); do
+    if curl -sf -o /dev/null --max-time 1 "${URL}/api/state" 2>/dev/null; then
+        break
+    fi
+    sleep 1
+done
+
 # Open the default browser. -g keeps the existing focused window from
 # losing focus (the launcher itself shouldn't steal it).
 open "${URL}"

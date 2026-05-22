@@ -308,9 +308,24 @@ def flash(args):
             print("[flasher] cache hit (no checksum available)")
 
     if not os.path.isfile(cached):
-        print(f"[flasher] downloading {img_name} ({img_url})...")
-        if not _download_with_progress(img_url, cached, "downloading",
-                                       expected_sha):
+        # Test mode: when AI_HUD_OTA_MIRROR_FIRST=1 try localhost:8000/update.img
+        # before GitHub. Lets a developer point a local `python3 -m http.server`
+        # at a pre-downloaded firmware image and skip the 478 MB CDN pull on
+        # every iteration. Production users never set the env var.
+        urls_to_try = []
+        if os.environ.get("AI_HUD_OTA_MIRROR_FIRST"):
+            urls_to_try.append("http://localhost:8000/" + img_name)
+        urls_to_try.append(img_url)
+
+        downloaded = False
+        for u in urls_to_try:
+            print(f"[flasher] downloading {img_name} ({u})...")
+            if _download_with_progress(u, cached, "downloading", expected_sha):
+                downloaded = True
+                break
+            print(f"[flasher]   source failed: {u}")
+
+        if not downloaded:
             notify("Firmware download failed.\n\n"
                    "Check your internet connection and try again.",
                    icon="stop")
