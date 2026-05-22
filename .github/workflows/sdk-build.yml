@@ -87,6 +87,143 @@ jobs:
           echo "--- USB CONFIGFS settings after patch ---"
           grep "^CONFIG_USB_CONFIGFS" "$DEF"
 
+      # ---- Enable watchdog + sysrq + pstore in kernel defconfig ----
+      # Without these the box has no recovery if S99_ai_hud's software
+      # `reboot -f` path hangs (RKAIQ holding ISP locks during
+      # machine_restart). Adds:
+      #   * DW_WATCHDOG   - hardware reset if userspace stops petting wdt
+      #   * MAGIC_SYSRQ   - kernel-level reboot fallback (echo b > sysrq-trigger)
+      #   * PSTORE_RAM    - last-kmsg survives reboot for forensics
+      # See memory/watchdog-reboot-hang.md for the incident.  Idempotent.
+      - name: Enable WATCHDOG/SYSRQ/PSTORE in kernel defconfig
+        working-directory: luckfox-pico
+        run: |
+          set -eu
+          DEF=sysdrv/source/kernel/arch/arm/configs/luckfox_rv1106_linux_defconfig
+          for KV in \
+              CONFIG_WATCHDOG=y \
+              CONFIG_WATCHDOG_CORE=y \
+              CONFIG_DW_WATCHDOG=y \
+              CONFIG_MAGIC_SYSRQ=y \
+              CONFIG_MAGIC_SYSRQ_DEFAULT_ENABLE=0x1 \
+              CONFIG_PSTORE=y \
+              CONFIG_PSTORE_RAM=y \
+              CONFIG_PSTORE_CONSOLE=y \
+              CONFIG_PSTORE_PMSG=y \
+              ; do
+              KEY="${KV%%=*}"
+              if grep -q "^${KEY}=" "$DEF"; then
+                  sed -i "s|^${KEY}=.*|${KV}|" "$DEF"
+              elif grep -q "^# ${KEY} is not set" "$DEF"; then
+                  sed -i "s|^# ${KEY} is not set|${KV}|" "$DEF"
+              else
+                  echo "${KV}" >> "$DEF"
+              fi
+          done
+          echo "--- Recovery configs after patch ---"
+          grep -E "^CONFIG_(WATCHDOG|DW_WATCHDOG|MAGIC_SYSRQ|PSTORE)" "$DEF" || true
+
+      # ---- Add ramoops reserved-memory to board DTS ----
+      # CONFIG_PSTORE_RAM=y wires the driver but ramoops needs a reserved
+      # RAM region from DT to know where to write. Without it the driver
+      # silently no-ops and /sys/fs/pstore never appears.
+      # Strategy: append a `&{/} { reserved-memory { ramoops { ... } } };`
+      # block to the board DTS. DTS lets the same root node be re-opened
+      # with `&{/}` and merges children, so we end up adding (not
+      # replacing) the reserved-memory entries. Using alloc-ranges + size
+      # (no explicit reg) lets the kernel pick a free address instead of
+      # us hard-coding one that could clash with CMA / RKMPI heaps.
+      # Best-effort: warn but don't fail if the board DTS pattern doesn't match.
+      - name: Add ramoops reserved-memory to board DTS
+        working-directory: luckfox-pico
+        run: |
+          set -eu
+          # Luckfox Pico Ultra board DTS lives under sysdrv/source/kernel
+          # somewhere; the exact filename varies between SDK revs so glob.
+          BOARD_DTS=$(find sysdrv/source/kernel/arch/arm/boot/dts \
+                          -type f \
+                          \( -name 'rv1106*ultra*.dts' \
+                             -o -name 'rv1106g3*emmc*.dts' \
+                             -o -name 'rv1106*pico*.dts' \) \
+                          -print 2>/dev/null | head -1 || true)
+          if [ -z "$BOARD_DTS" ]; then
+              echo "::warning::No board DTS matched glob, ramoops DTS overlay skipped"
+              echo "::warning::PSTORE driver will load but /sys/fs/pstore won't mount"
+              find sysdrv/source/kernel/arch/arm/boot/dts -name 'rv1106*' \
+                  -print 2>/dev/null | head -10 || true
+              exit 0
+          fi
+          echo "Target board DTS: $BOARD_DTS"
+
+          if grep -q 'compatible = "ramoops"' "$BOARD_DTS"; then
+              echo "ramoops already declared (no-op)"
+              exit 0
+          fi
+
+          # Append via printf to side-step YAML block-scalar indent
+          # constraints that a column-0 heredoc body would violate.
+          # Format is `%s\n` so each arg = one DTS line.  A leading blank
+          # line keeps the new block visually separated from whatever the
+          # board DTS ends with.
+          echo "" >> "$BOARD_DTS"
+          printf '%s\n' \
+              '/* ---- ai-hud: PSTORE ramoops for last-kmsg forensics ---- */' \
+              '/* Added by sdk-build.yml -- see memory/watchdog-reboot-hang.md. */' \
+              '&{/} {' \
+              '    reserved-memory {' \
+              '        #address-cells = <1>;' \
+              '        #size-cells = <1>;' \
+              '        ranges;' \
+              '' \
+              '        ramoops_reserved: ramoops {' \
+              '            compatible = "ramoops";' \
+              '            alloc-ranges = <0x00000000 0x10000000>;' \
+              '            size = <0x100000>;        /* 1 MB total */' \
+              '            no-map;' \
+              '            record-size = <0x4000>;   /* 16 KB per record */' \
+              '            console-size = <0x40000>; /* 256 KB rolling console */' \
+              '            pmsg-size = <0x4000>;     /* 16 KB userspace pmsg */' \
+              '        };' \
+              '    };' \
+              '};' \
+              >> "$BOARD_DTS"
+          echo "Appended ramoops block to $BOARD_DTS"
+          tail -25 "$BOARD_DTS"
+
+      # ---- Enable wdt status in the RV1106 device tree ----
+      # The DW_WATCHDOG driver needs the wdt node enabled; vendor DTSI ships
+      # it with status="disabled". We patch the first status line inside the
+      # wdt block (sed address range "/wdt:/,/};/" -- safe for simple
+      # non-nested wdt nodes, which is how Rockchip DTSI structures them).
+      # Idempotent: a no-op if status already says "okay".
+      - name: Enable wdt in device tree
+        working-directory: luckfox-pico
+        run: |
+          set -eu
+          DTSI=$(find sysdrv/source/kernel/arch/arm/boot/dts \
+                      -name 'rv1106.dtsi' -print -quit 2>/dev/null || true)
+          if [ -z "$DTSI" ]; then
+              echo "::warning::rv1106.dtsi not found, skipping DT patch"
+              find sysdrv/source/kernel/arch/arm/boot/dts -name '*.dtsi' \
+                  -print 2>/dev/null | head -5 || true
+              exit 0
+          fi
+          echo "Inspecting wdt node in $DTSI"
+          # Show current state for the log
+          sed -n '/wdt:[[:space:]]*watchdog@/,/};/p' "$DTSI" || true
+          if sed -n '/wdt:[[:space:]]*watchdog@/,/};/p' "$DTSI" \
+                  | grep -q 'status[[:space:]]*=[[:space:]]*"disabled"'; then
+              # Flip ONLY the status line that lives inside the wdt block
+              sed -i '/wdt:[[:space:]]*watchdog@/,/};/{
+                  s/status[[:space:]]*=[[:space:]]*"disabled"/status = "okay"/
+              }' "$DTSI"
+              echo "wdt status set to okay"
+          else
+              echo "wdt already okay or no status line (no-op)"
+          fi
+          echo "--- wdt block after patch ---"
+          sed -n '/wdt:[[:space:]]*watchdog@/,/};/p' "$DTSI"
+
       # ---- Register the rootfs post-build hook ----
       # Drops scripts/buildroot_post_build.sh into Buildroot's
       # BR2_ROOTFS_POST_BUILD_SCRIPT slot so /etc/ai_hud_db_secret

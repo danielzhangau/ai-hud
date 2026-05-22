@@ -169,7 +169,14 @@ static int isp_init(void) {
         printf("[WARN] ISP init failed (likely V4L2 race from previous "
                "instance), retrying in 2s...\n");
         fflush(stdout);
-        sleep(2);
+        /* Chunked sleep so SIGTERM during init doesn't waste the full 2s
+         * before main() can fall through to cleanup. */
+        for (int i = 0; i < 20 && g_running; i++)
+            usleep(100 * 1000);
+        if (!g_running) {
+            printf("[INFO] ISP init aborted by signal\n");
+            return -1;
+        }
         ret = isp_ctrl_init(ISP_CAM_ID, IQ_FILE_DIR);
         if (ret != 0) {
             printf("[ERROR] ISP init failed twice, giving up\n");
@@ -721,7 +728,11 @@ static void *fps_monitor_thread(void *arg) {
     printf("[INFO] FPS monitor thread started\n");
 
     while (g_running) {
-        sleep(5);
+        /* Chunked sleep so SIGTERM doesn't have to wait up to 5s for this
+         * thread to notice -- previously the only thread that blocked
+         * stop() past the 6s graceful-exit budget in S99_ai_hud. */
+        for (int slept = 0; slept < 5 && g_running; slept++)
+            sleep(1);
         if (!g_running)
             break;
 
