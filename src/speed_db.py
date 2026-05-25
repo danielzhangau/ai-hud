@@ -30,6 +30,7 @@ import os
 import struct
 import math
 import time as _time
+from collections import deque as _deque
 
 try:
     # db_signer is shipped alongside speed_db on the device (both in /root/).
@@ -543,32 +544,75 @@ class QueryResult:
 #
 # Reference: postprocess.h BOX_THRESH = 0.65 (training F1-optimal=0.664).
 # A box only reaches Python after passing BOX_THRESH, so any fusion
-# threshold below 0.65 has no effect -- before 2026-05-19 the no-DB
-# threshold was 0.60 and silently turned off the entire fusion guard
-# in regions where the GPS DB has no coverage.
+# threshold below 0.65 has no effect.
 #
 # Trade-offs by region:
 #   * DB-covered (highway, AU/CN main roads): aggressive 0.80 -- if the
 #     NPU is rejected the DB value is used, which is correct by design.
-#   * No-DB (small roads, new construction): 0.75 -- NPU is the only
-#     source; over-tightening risks falling back to default_limit, which
-#     can be wrong.
+#   * No-DB (small roads, new construction, GPS lost in tunnel): 0.75
+#     -- NPU is the only source; over-tightening risks falling back to
+#     default_limit which is often wrong.
 NPU_CONFIDENCE_MIN = 0.80       # minimum confidence when DB has data
 NPU_CONFIDENCE_NO_DB = 0.75     # minimum confidence when DB is silent
-NPU_VOTE_REQUIRED = 4           # ~4 GPS cycles at 1 Hz; still <= sign visibility window
-NPU_OVERRIDE_TIMEOUT = 20.0     # seconds before reverting to DB (longer = less flap)
+
+# Sliding-window voting (replaces the legacy "strict consecutive N"
+# accumulator). Best practice from ADAS TSR literature: require N
+# matching detections within a sliding window of M polls, not strict
+# consecutivity -- a real sign briefly occluded by foliage / a passing
+# truck still attests in M-1 of M frames, while a stray phantom from
+# motion blur burns one slot but does not break a real candidate.
+#
+# Window timing at the ~1 Hz Python poll rate (GPS RMC-driven):
+#   8s window  -> ~8 polls observed  -- comfortably > WINDOW_SIZE
+#   WINDOW_SIZE=6 caps the ring buffer so a slow drive (RMC stalls)
+#                  cannot grow it unboundedly.
+#   WINDOW_MATCH=4 = "majority within window" -- knocks out 2-frame
+#                    transient flickers while keeping accept latency
+#                    bounded (4 polls = ~4s).
+NPU_VOTE_WINDOW_S = 8.0
+NPU_WINDOW_SIZE = 6
+NPU_WINDOW_MATCH = 4            # AKA `npu_vote_required` in ai_hud.conf
+
+# Release hysteresis: while an override is live, this many consecutive
+# trusted-but-different NPU detections force-drop it without waiting
+# for the slower acceptance threshold of the new candidate. Tuned to
+# 3 polls (~3s) so a genuine zone-boundary read is reflected quickly,
+# but a single mis-classification doesn't flip the limit.
+NPU_RELEASE_DISSENT = 3
+
+NPU_OVERRIDE_TIMEOUT = 20.0     # seconds NPU may go silent before the
+                                # override is dropped (covers the
+                                # "drove past sign, no successor" case
+                                # neither acceptance nor dissent catches)
 
 
 class SpeedFusion:
     """State machine for fusing DB and NPU speed limit sources.
 
-    Prevents flickering by requiring temporal consistency from NPU.
-    DB is always the trusted baseline; NPU can only lower the limit
-    (construction zones, temporary changes), never raise it.
+    DB is the trusted baseline (when confidence >= OFFICIAL_ONLY).
+    NPU may only LOWER a trusted DB limit (construction / temporary
+    zones), never raise it. When DB is silent -- no GPS fix, no
+    coverage, or only single-source confidence -- NPU drives the
+    limit unilaterally.
+
+    Voting algorithm (sliding-window N-of-M with release hysteresis):
+      1. Each poll appends one sample (npu_limit if confidence >=
+         threshold, else 0 "absent") to a deque trimmed by both age
+         (NPU_VOTE_WINDOW_S) and size (NPU_WINDOW_SIZE).
+      2. RELEASE: while an override is live, NPU_RELEASE_DISSENT
+         consecutive trusted detections of a DIFFERENT value drop
+         the override -- prevents an old override clinging via the
+         slower acceptance path when entering a new zone.
+      3. ACCEPT: any value with >= NPU_WINDOW_MATCH positive samples
+         in the window becomes the override (subject to the DB-lower
+         rule when DB is trustworthy).
+      4. TIMEOUT: NPU-quiet for NPU_OVERRIDE_TIMEOUT seconds drops
+         the override even without dissent.
 
     Usage:
         fusion = SpeedFusion()
-        # Called once per GPS cycle (~1 Hz):
+        # Once per GPS RMC (~1 Hz). When GPS is invalid pass db_limit=0
+        # -- do NOT call reset(), or in-tunnel NPU votes will be lost:
         limit = fusion.update(db_limit, npu_limit, npu_confidence)
     """
 
@@ -577,28 +621,47 @@ class SpeedFusion:
                  confidence_no_db=None,
                  vote_required=None,
                  override_timeout=None,
-                 camera_alert_radius=None):
+                 camera_alert_radius=None,
+                 vote_window_s=None,
+                 window_size=None,
+                 release_dissent=None):
         self.default = default_limit
 
-        # Configurable thresholds (fall back to module-level defaults)
+        # Configurable thresholds (fall back to module-level defaults).
+        # `vote_required` is the legacy ctor kwarg for window_match;
+        # kept so /root/ai_hud.conf doesn't need migration.
         self.confidence_min = (confidence_min if confidence_min is not None
                                else NPU_CONFIDENCE_MIN)
         self.confidence_no_db = (confidence_no_db if confidence_no_db is not None
                                  else NPU_CONFIDENCE_NO_DB)
-        self.vote_required = (vote_required if vote_required is not None
-                              else NPU_VOTE_REQUIRED)
+        self.window_match = (vote_required if vote_required is not None
+                             else NPU_WINDOW_MATCH)
+        # Alias kept for log lines and external readers
+        self.vote_required = self.window_match
         self.override_timeout = (override_timeout if override_timeout is not None
                                  else NPU_OVERRIDE_TIMEOUT)
         self.camera_alert_radius = (camera_alert_radius
                                     if camera_alert_radius is not None
                                     else CAMERA_ALERT_RADIUS)
+        self.vote_window_s = (vote_window_s if vote_window_s is not None
+                              else NPU_VOTE_WINDOW_S)
+        self.window_size = (window_size if window_size is not None
+                            else NPU_WINDOW_SIZE)
+        self.release_dissent = (release_dissent if release_dissent is not None
+                                else NPU_RELEASE_DISSENT)
 
-        # NPU voting state
-        self._npu_candidate = 0       # value NPU is proposing
-        self._npu_votes = 0           # consecutive matching detections
-        self._npu_override = 0        # accepted NPU override value (0 = none)
-        self._npu_override_time = 0.0 # when override was last confirmed
-        self._last_db_limit = 0       # last known DB limit
+        # Sliding-window state.
+        # _npu_history: deque of (timestamp, value). value=0 means
+        # "this poll saw no qualifying NPU detection" -- recording it
+        # is essential so the window naturally ages out absent frames
+        # and a candidate must hold its share against silence.
+        self._npu_history = _deque()
+        self._npu_override = 0        # accepted NPU override (0 = none)
+        self._npu_override_time = 0.0 # last time override was confirmed
+        self._last_db_limit = 0       # last DB hit (for zone-change reset)
+        # Release-hysteresis: count of consecutive dissenting polls
+        self._npu_dissent_value = 0
+        self._npu_dissent_votes = 0
 
         # Output
         self.effective_limit = default_limit
@@ -609,7 +672,10 @@ class SpeedFusion:
         """Update fusion state and return effective speed limit.
 
         Args:
-            db_limit: speed limit from database (0 = unknown)
+            db_limit: speed limit from database (0 = unknown / GPS lost
+                / no coverage). Pass 0 when GPS is invalid so the NPU
+                drives the UI alone -- do NOT call reset() in that case
+                or in-tunnel NPU votes will be discarded.
             npu_limit: speed limit from NPU detection (0 = no detection)
             npu_confidence: NPU confidence (0.0 - 1.0)
             now: current time (default: time.time())
@@ -628,66 +694,87 @@ class SpeedFusion:
         if now is None:
             now = _time.time()
 
-        # Track DB baseline changes (new road segment)
+        # --- Zone-change reset on new trusted DB segment ---
+        if db_limit > 0 and db_limit != self._last_db_limit:
+            self._npu_override = 0
+            self._npu_dissent_value = 0
+            self._npu_dissent_votes = 0
         if db_limit > 0:
-            if db_limit != self._last_db_limit:
-                # Entered a new road segment -- reset NPU override
-                self._npu_override = 0
-                self._npu_votes = 0
-                self._npu_candidate = 0
             self._last_db_limit = db_limit
 
-        # --- NPU voting logic ---
-        # "Trustworthy DB" means a DB record exists AND its confidence
-        # is at least OFFICIAL_ONLY. Below that threshold we treat the
-        # DB lookup as silent so the NPU isn't forced to outscore a
-        # value we don't trust ourselves.
+        # --- DB trustworthiness gate ---
         db_trustworthy = (db_limit > 0 and
                           (db_confidence is None or
                            db_confidence >= CONFIDENCE_OFFICIAL_ONLY))
         conf_threshold = (self.confidence_min if db_trustworthy
                           else self.confidence_no_db)
+        npu_passed = npu_limit > 0 and npu_confidence >= conf_threshold
 
-        npu_active = npu_limit > 0 and npu_confidence >= conf_threshold
+        # --- Append to sliding window (with both age + size trim) ---
+        # value=0 entries occupy a slot, so a candidate must hold
+        # >= window_match POSITIVE samples to win; intermittent NPU
+        # dropouts cost slots but do not reset its count.
+        sample = npu_limit if npu_passed else 0
+        self._npu_history.append((now, sample))
+        cutoff = now - self.vote_window_s
+        while self._npu_history and self._npu_history[0][0] < cutoff:
+            self._npu_history.popleft()
+        while len(self._npu_history) > self.window_size:
+            self._npu_history.popleft()
 
-        if npu_active:
-            if npu_limit == self._npu_candidate:
-                self._npu_votes += 1
+        # --- Release hysteresis (runs before acceptance so a same-
+        # poll acceptance can still pick up the dissenting value as
+        # the new winner if it has enough window samples) ---
+        if (self._npu_override > 0 and npu_passed
+                and npu_limit != self._npu_override):
+            if npu_limit == self._npu_dissent_value:
+                self._npu_dissent_votes += 1
             else:
-                # New candidate -- reset vote counter
-                self._npu_candidate = npu_limit
-                self._npu_votes = 1
+                self._npu_dissent_value = npu_limit
+                self._npu_dissent_votes = 1
+            if self._npu_dissent_votes >= self.release_dissent:
+                # Force-drop override. Keep the window: the dissenting
+                # value's samples now count toward acceptance below, so
+                # if it already had enough matches it picks up the
+                # override in the same poll.
+                self._npu_override = 0
+                self._npu_dissent_votes = 0
+                self._npu_dissent_value = 0
+        elif npu_passed and npu_limit == self._npu_override:
+            # Override re-confirmed -- reset dissent + refresh timeout.
+            self._npu_dissent_value = 0
+            self._npu_dissent_votes = 0
+            self._npu_override_time = now
 
-        # --- Check if NPU candidate qualifies as override ---
-        # Only accept/refresh override when NPU is ACTIVELY detecting
-        # this frame. Stale votes cannot refresh the timeout.
-        npu_accepted = False
-        if (npu_active and self._npu_votes >= self.vote_required):
-            candidate = self._npu_candidate
+        # --- Acceptance: winner of the window ---
+        counts = {}
+        for _, v in self._npu_history:
+            if v > 0:
+                counts[v] = counts.get(v, 0) + 1
+        winner_value, winner_count = 0, 0
+        if counts:
+            winner_value, winner_count = max(
+                counts.items(), key=lambda kv: kv[1])
 
+        if winner_count >= self.window_match:
             if db_trustworthy:
-                # Trusted DB: NPU can only LOWER the limit (safer)
-                if 0 < candidate < db_limit:
-                    self._npu_override = candidate
+                # Trusted DB: NPU may only LOWER (safer)
+                if 0 < winner_value < db_limit:
+                    self._npu_override = winner_value
                     self._npu_override_time = now
-                    npu_accepted = True
-                # If NPU matches DB, that's confirmation, not override
-                elif candidate == db_limit:
-                    pass
-                # If NPU > DB, ignore (never relax limit from NPU)
+                # winner_value == db_limit -> confirmation, no override
+                # winner_value >  db_limit -> ignored (never relax)
             else:
-                # No trustworthy DB: accept NPU as primary source
-                self._npu_override = candidate
+                # No trustworthy DB -> accept whatever the window says
+                self._npu_override = winner_value
                 self._npu_override_time = now
-                npu_accepted = True
 
-        # --- Check NPU override timeout ---
-        if (self._npu_override > 0 and not npu_accepted
-                and now - self._npu_override_time > self.override_timeout):
-            # NPU hasn't re-confirmed within timeout -- revert
+        # --- Quiet-period timeout ---
+        if (self._npu_override > 0 and
+                now - self._npu_override_time > self.override_timeout):
             self._npu_override = 0
-            self._npu_votes = 0
-            self._npu_candidate = 0
+            self._npu_dissent_value = 0
+            self._npu_dissent_votes = 0
 
         # --- Determine effective limit ---
         if self._npu_override > 0:
@@ -697,10 +784,9 @@ class SpeedFusion:
             self.effective_limit = db_limit
             self.source = SOURCE_DB
         elif db_limit > 0:
-            # We have a DB hit but only at SINGLE_SOURCE confidence
-            # (e.g. OSM-only segment). Keep the value internally so a
-            # later cross-verify pipeline can elevate it, but tell the
-            # UI not to render it as a number.
+            # DB hit but only at SINGLE_SOURCE confidence -- numeric
+            # value kept for future cross-verify, but renderer paints
+            # "--" so the driver never sees an unverified limit.
             self.effective_limit = db_limit
             self.source = SOURCE_DB_LOW_CONFIDENCE
         else:
@@ -710,12 +796,15 @@ class SpeedFusion:
         return self.effective_limit
 
     def reset(self):
-        """Reset all state (e.g., on GPS fix loss)."""
-        self._npu_candidate = 0
-        self._npu_votes = 0
+        """Reset all state. Used on startup; AVOID on GPS fix loss --
+        call update(db_limit=0, ...) instead so NPU votes accumulated
+        before the GPS loss aren't thrown away (tunnel scenarios)."""
+        self._npu_history.clear()
         self._npu_override = 0
         self._npu_override_time = 0.0
         self._last_db_limit = 0
+        self._npu_dissent_value = 0
+        self._npu_dissent_votes = 0
         self.effective_limit = self.default
         self.source = SOURCE_DEFAULT
 
