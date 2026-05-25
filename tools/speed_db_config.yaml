@@ -107,6 +107,23 @@ regions:
   cn:
     description: "China (Xi'an + Shanghai)"
     output_suffix: "_cn"  # speed_zones_cn.db, speed_cameras_cn.db
+
+    # Per-city group codes stamped on each emitted SpeedSegment's
+    # `state` field so the cross-verify summary groups XIA/SHA/...
+    # rows distinctly. The fetcher resolves a tile name (key of
+    # `cities` below) to its code by longest-prefix match: the
+    # longest entry here that the tile name starts with wins.
+    # Adding a new city = one new line in `cities` + (if grouping
+    # differently) one new line here.
+    city_codes:
+      "Xi'an":     XIA
+      "Shanghai":  SHA
+      "Beijing":   BJI
+      "Guangzhou": GZH
+      "Shenzhen":  SZX
+      "Chengdu":   CTU
+      "Hangzhou":  HGH
+
     overpass_camera_query: |
       [out:json][timeout:120];
       (

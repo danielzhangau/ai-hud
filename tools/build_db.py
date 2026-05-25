@@ -1,24 +1,37 @@
 """End-to-end speed DB builder: fetch -> cross-verify -> write v3 binary.
 
-This is the new entry point that supersedes the legacy
-`prepare_speed_db.py` for the AU region. It pulls from every
-configured fetcher in parallel-friendly order, runs the spatial
+The new entry point for both AU and CN region builds (2026-05-25).
+It pulls from every configured fetcher, runs the spatial
 cross-verification engine, and writes the result as a v3 binary DB.
 
-The legacy script is kept around for the CN region (which still
-relies on OSM-only Overpass) and as a fallback until the OTA
-pipeline confirms v3 DBs work on shipped firmware. After one
-release cycle of clean v3 builds, prepare_speed_db.py can be retired.
+Region differences in one place rather than spread across the script:
+  * AU runs N state-government fetchers + OSM cross-verify and uses
+    `cv.OFFICIAL_BITS` (state govs only).
+  * CN runs `cn_osm` alone -- no government open data exists
+    (see tools/fetchers/cn_unavailable.py) -- and uses
+    `cv.OFFICIAL_BITS_CN` so OSM-only segments resolve to
+    CONFIDENCE_OFFICIAL_ONLY instead of SINGLE_SOURCE.
+
+Cameras: AU + CN camera DBs still come from `prepare_speed_db.py`
+(--cameras-only). That script reads `known_cameras` from the same
+YAML config and signs the output the same way; reusing it avoids
+duplicating the curated-list parsing in two places. After
+`build_db.py` writes zones, the CLI optionally invokes the legacy
+script in `--cameras-only` mode so a single `tools/build_db.py
+--region cn` call produces both .db files.
 
 CLI usage:
     python3 tools/build_db.py --region au
     python3 tools/build_db.py --region au --states nsw,wa,act
-    python3 tools/build_db.py --region au --quarantine-only
+    python3 tools/build_db.py --region cn
+    python3 tools/build_db.py --region cn --cities Xi\\'an_CBD,Shanghai_W
+    python3 tools/build_db.py --region cn --zones-only
 
 Outputs:
-    data/speed_zones.db              -- v3 binary, sorted by grid_key
-    data/quarantine/au_zones_<date>.jsonl  -- conflicting segments
-    data/quarantine/au_summary_<date>.md   -- human-readable report
+    data/speed_zones[_cn].db                    -- v3 binary
+    data/speed_cameras[_cn].db                  -- v2 binary (via prepare_speed_db)
+    data/quarantine/<region>_zones_<date>.jsonl -- conflicting segments
+    data/quarantine/<region>_summary_<date>.md  -- human-readable report
 """
 from __future__ import annotations
 
@@ -58,6 +71,7 @@ import db_signer  # noqa: E402
 # Fetcher registry. Each entry is (state code, fetcher factory). When a
 # new state lands, append here -- nothing else needs to change.
 from tools.fetchers import au_act, au_nsw, au_osm, au_qld, au_vic, au_wa  # noqa: E402
+from tools.fetchers import cn_osm  # noqa: E402
 
 AU_FETCHERS = [
     ("nsw", au_nsw.NSWFetcher),
@@ -121,10 +135,11 @@ def _write_zones_db(path: Path, verified: list) -> None:
 
 
 def _write_quarantine_report(quarantine: list, out_md: Path,
-                             summary: dict) -> None:
+                             summary: dict, region: str = "au") -> None:
     """Write the human-readable summary that ends up in the PR body."""
     lines = []
-    lines.append(f"# Speed DB build report  ({_dt.date.today()})\n")
+    lines.append(f"# Speed DB build report ({region.upper()}, "
+                 f"{_dt.date.today()})\n")
     lines.append(f"- Verified records: **{summary['verified_total']:,}**")
     lines.append(f"- Quarantined records: **{summary['quarantine_total']:,}**\n")
 
@@ -142,8 +157,12 @@ def _write_quarantine_report(quarantine: list, out_md: Path,
         lines.append(f"- {name}: {count:,} ({pct:.1f}%)")
     lines.append("")
 
-    lines.append("## Per-state breakdown")
-    lines.append("| State | Verified | Quarantine |")
+    # AU groups by state (NSW/VIC/...); CN groups by city code
+    # (XIA/SHA/...). The table header tracks whichever the records
+    # were tagged with so the PR body reads naturally in either case.
+    group_label = "City" if region == "cn" else "State"
+    lines.append(f"## Per-{group_label.lower()} breakdown")
+    lines.append(f"| {group_label} | Verified | Quarantine |")
     lines.append("|-------|----------|------------|")
     for state, counts in sorted(summary["by_state"].items()):
         lines.append(f"| {state} | {counts['verified']:,} | "
@@ -256,7 +275,7 @@ def build_au(states: list[str], output_dir: Path,
     quarantine_dir.mkdir(parents=True, exist_ok=True)
     cv.write_quarantine(quarantine, quarantine_dir / f"au_zones_{date}.jsonl")
     report = quarantine_dir / f"au_summary_{date}.md"
-    _write_quarantine_report(quarantine, report, summary)
+    _write_quarantine_report(quarantine, report, summary, region="au")
 
     # Machine-readable companion. Used by tools/db_health.py to decide
     # whether the auto-generated PR is safe to auto-merge. We dump the
@@ -275,36 +294,130 @@ def build_au(states: list[str], output_dir: Path,
     return zones_path, report
 
 
+def build_cn(cities: list[str], output_dir: Path,
+             quarantine_dir: Path) -> tuple[Path, Path]:
+    """Run the full CN pipeline. Returns (zones_db_path, report_path).
+
+    Single-fetcher (cn_osm) so cross-verify mostly dedupes
+    spatially-coincident OSM ways and quarantines internally
+    inconsistent tagging. `OFFICIAL_BITS_CN` lets single-source
+    OSM still produce usable OFFICIAL_ONLY records.
+    """
+    print(f"[build_db] === CN ===  cities={cities or 'ALL'}")
+    fetcher = cn_osm.OSMCNFetcher(cities=cities or None)
+    try:
+        segs = fetcher.fetch()
+    except Exception as exc:  # surface to operator; do not write empty DB
+        print(f"[build_db] ERROR: CN fetch failed: {exc}", file=sys.stderr)
+        raise
+
+    print(f"[build_db] cross-verifying {len(segs):,} CN segments...")
+    verified, quarantine = cv.verify_segments(segs,
+                                              official_bits=cv.OFFICIAL_BITS_CN)
+    print(f"[build_db]   -> verified={len(verified):,} "
+          f"quarantine={len(quarantine):,}")
+
+    summary = cv.summarize(verified, quarantine)
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+    zones_path = output_dir / "speed_zones_cn.db"
+    _write_zones_db(zones_path, verified)
+
+    key = db_signer.load_key()
+    sig_path = db_signer.sign_file(zones_path, key)
+    print(f"[build_db] signed -> {sig_path} ({sig_path.stat().st_size} bytes)")
+
+    date = _dt.date.today().isoformat()
+    quarantine_dir.mkdir(parents=True, exist_ok=True)
+    cv.write_quarantine(quarantine, quarantine_dir / f"cn_zones_{date}.jsonl")
+    report = quarantine_dir / f"cn_summary_{date}.md"
+    _write_quarantine_report(quarantine, report, summary, region="cn")
+
+    summary_json = quarantine_dir / f"cn_summary_{date}.json"
+    summary_json.write_text(json.dumps({
+        **summary,
+        "zones_db_path": str(zones_path),
+        "zones_db_size": zones_path.stat().st_size,
+        "build_date": date,
+        "region": "cn",
+    }, separators=(",", ":")) + "\n")
+
+    return zones_path, report
+
+
+def _delegate_cameras(region: str, output_dir: Path) -> Path:
+    """Run `prepare_speed_db.py --cameras-only` for `region`.
+
+    Cameras stay on the legacy v2 path -- they're point features
+    without the cross-source agreement question that drives
+    cross_verify. Raises CalledProcessError on subprocess failure
+    so a broken cameras build fails the whole CI run rather than
+    silently shipping a stale .db.
+    """
+    import subprocess
+    cameras_filename = ("speed_cameras_cn.db" if region == "cn"
+                        else "speed_cameras.db")
+    legacy = _REPO_ROOT / "tools" / "prepare_speed_db.py"
+    cmd = [
+        sys.executable, "-u", str(legacy),
+        "--region", region, "--cameras-only",
+        "--output-dir", str(output_dir),
+    ]
+    print(f"[build_db] delegating cameras to: {' '.join(cmd)}")
+    subprocess.run(cmd, check=True)
+    return output_dir / cameras_filename
+
+
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--region", default="au",
-                    help="Currently only 'au' is implemented in the new "
-                         "pipeline; 'cn' continues to use prepare_speed_db.py")
+    ap.add_argument("--region", default="au", choices=["au", "cn"],
+                    help="Region build to run (default: au)")
     ap.add_argument("--states", default="",
-                    help="Comma-separated state codes to include "
+                    help="AU only: comma-separated state codes "
                          "(nsw,vic,qld,wa,act); empty = all")
+    ap.add_argument("--cities", default="",
+                    help="CN only: comma-separated city tile names "
+                         "(e.g. Xi'an_CBD,Shanghai_W); empty = all")
     ap.add_argument("--output-dir", default=None,
                     help="Output dir for .db (default: data/)")
     ap.add_argument("--quarantine-dir", default=None,
                     help="Output dir for quarantine reports "
                          "(default: data/quarantine/)")
+    stage = ap.add_mutually_exclusive_group()
+    stage.add_argument("--zones-only", action="store_true",
+                       help="Skip the cameras subprocess delegation")
+    stage.add_argument("--cameras-only", action="store_true",
+                       help="Skip zones, only invoke the cameras subprocess")
     args = ap.parse_args()
-
-    if args.region != "au":
-        print(f"ERROR: region '{args.region}' not supported by build_db.py; "
-              f"use prepare_speed_db.py for cn", file=sys.stderr)
-        sys.exit(2)
 
     output_dir = Path(args.output_dir or _REPO_ROOT / "data")
     quarantine_dir = Path(args.quarantine_dir
                           or _REPO_ROOT / "data" / "quarantine")
-    states = [s.strip().lower() for s in args.states.split(",") if s.strip()]
 
-    zones_path, report = build_au(states, output_dir, quarantine_dir)
+    zones_path: Path | None = None
+    report: Path | None = None
+
+    if not args.cameras_only:
+        if args.region == "au":
+            states = [s.strip().lower() for s in args.states.split(",")
+                      if s.strip()]
+            zones_path, report = build_au(states, output_dir, quarantine_dir)
+        else:  # cn
+            cities = [c.strip() for c in args.cities.split(",") if c.strip()]
+            zones_path, report = build_cn(cities, output_dir, quarantine_dir)
+
+    cameras_path: Path | None = None
+    if not args.zones_only:
+        cameras_path = _delegate_cameras(args.region, output_dir)
+
     print(f"\n{'='*60}")
     print(f"Build complete.")
-    print(f"  DB:     {zones_path}")
-    print(f"  Report: {report}")
+    if zones_path:
+        print(f"  Zones:   {zones_path}")
+    if cameras_path:
+        print(f"  Cameras: {cameras_path}")
+    if report:
+        print(f"  Report:  {report}")
 
 
 if __name__ == "__main__":

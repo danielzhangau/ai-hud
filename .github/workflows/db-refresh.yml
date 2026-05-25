@@ -46,26 +46,35 @@ jobs:
             echo "cn_cams=$(stat -c%s data/speed_cameras_cn.db 2>/dev/null || echo 0)"
           } >> "$GITHUB_OUTPUT"
 
-      # Stash the previous-merged AU build artefacts so the health scorer
-      # later in this job can compare against them. We resolve them from
-      # the on-disk file (which is what we just snapshotted sizes for) and
-      # from the JSON summary stored alongside under data/quarantine/.
+      # Stash the previous-merged build artefacts (AU + CN) so the
+      # health scorer later in this job can compare each region against
+      # its own baseline. We resolve them from the on-disk files (which
+      # is what we just snapshotted sizes for) and from the per-region
+      # JSON summaries stored alongside under data/quarantine/.
       - name: Stash previous-build artefacts for delta comparison
         id: baseline
         run: |
           mkdir -p /tmp/baseline
-          # Copy the .db file as-is so db_health can read its header.
-          cp data/speed_zones.db /tmp/baseline/old_speed_zones.db 2>/dev/null || true
-          # The summary JSON name has a date in it; just take the newest.
-          # This is best-effort -- a fresh repo without prior summary
-          # will get treated as "no baseline" by db_health.
-          PREV_JSON=$(ls -t data/quarantine/au_summary_*.json 2>/dev/null | head -1)
-          if [ -n "$PREV_JSON" ] && [ -f "$PREV_JSON" ]; then
-              cp "$PREV_JSON" /tmp/baseline/old_summary.json
-              echo "old_summary=/tmp/baseline/old_summary.json" >> "$GITHUB_OUTPUT"
+          cp data/speed_zones.db    /tmp/baseline/old_au_zones.db 2>/dev/null || true
+          cp data/speed_zones_cn.db /tmp/baseline/old_cn_zones.db 2>/dev/null || true
+          # The summary JSON names embed a date; just take the newest of each.
+          # Best-effort -- a fresh repo without prior summary gets treated as
+          # "no baseline" by db_health, which then requires human review.
+          AU_PREV_JSON=$(ls -t data/quarantine/au_summary_*.json 2>/dev/null | head -1)
+          CN_PREV_JSON=$(ls -t data/quarantine/cn_summary_*.json 2>/dev/null | head -1)
+          if [ -n "$AU_PREV_JSON" ] && [ -f "$AU_PREV_JSON" ]; then
+              cp "$AU_PREV_JSON" /tmp/baseline/old_au_summary.json
+              echo "old_au_summary=/tmp/baseline/old_au_summary.json" >> "$GITHUB_OUTPUT"
           fi
-          if [ -f /tmp/baseline/old_speed_zones.db ]; then
-              echo "old_db=/tmp/baseline/old_speed_zones.db" >> "$GITHUB_OUTPUT"
+          if [ -n "$CN_PREV_JSON" ] && [ -f "$CN_PREV_JSON" ]; then
+              cp "$CN_PREV_JSON" /tmp/baseline/old_cn_summary.json
+              echo "old_cn_summary=/tmp/baseline/old_cn_summary.json" >> "$GITHUB_OUTPUT"
+          fi
+          if [ -f /tmp/baseline/old_au_zones.db ]; then
+              echo "old_au_db=/tmp/baseline/old_au_zones.db" >> "$GITHUB_OUTPUT"
+          fi
+          if [ -f /tmp/baseline/old_cn_zones.db ]; then
+              echo "old_cn_db=/tmp/baseline/old_cn_zones.db" >> "$GITHUB_OUTPUT"
           fi
 
       # AU uses the new build_db.py pipeline (state fetchers + OSM
@@ -88,11 +97,15 @@ jobs:
           PYTHONUNBUFFERED: "1"
         run: python3 -u tools/build_db.py --region au
 
-      - name: Rebuild CN databases (legacy OSM-only)
+      # CN: cn_osm only (China has no open gov speed data; see
+      # tools/fetchers/cn_unavailable.py). `OFFICIAL_BITS_CN` lifts OSM
+      # to "official" so single-source segments land at OFFICIAL_ONLY,
+      # not SINGLE_SOURCE -- Xi'an + Shanghai render numbers, not "--".
+      - name: Rebuild CN databases
         env:
           AI_HUD_DB_SECRET: ${{ secrets.AI_HUD_DB_SECRET }}
           PYTHONUNBUFFERED: "1"
-        run: python3 -u tools/prepare_speed_db.py --region cn
+        run: python3 -u tools/build_db.py --region cn
 
       - name: Compute diff stats
         id: diff
@@ -114,9 +127,10 @@ jobs:
               echo "CN zones:   ${{ steps.pre.outputs.cn_zones }} -> $(stat -c%s data/speed_zones_cn.db) bytes ($(delta ${{ steps.pre.outputs.cn_zones }} data/speed_zones_cn.db))"
               echo "CN cameras: ${{ steps.pre.outputs.cn_cams }} -> $(stat -c%s data/speed_cameras_cn.db) bytes ($(delta ${{ steps.pre.outputs.cn_cams }} data/speed_cameras_cn.db))"
           } | tee diff.txt
-          # Locate the AU build report written by build_db.py. The
-          # filename embeds today's date so we glob.
+          # Locate the per-region build reports written by build_db.py.
+          # The filename embeds today's date so we glob for the newest.
           AU_REPORT=$(ls data/quarantine/au_summary_*.md 2>/dev/null | head -1)
+          CN_REPORT=$(ls data/quarantine/cn_summary_*.md 2>/dev/null | head -1)
           {
               echo 'body<<EOF'
               echo '## Monthly speed database refresh'
@@ -133,35 +147,70 @@ jobs:
                   cat "$AU_REPORT"
                   echo
               fi
+              if [ -n "$CN_REPORT" ] && [ -f "$CN_REPORT" ]; then
+                  echo '### CN cross-verification report'
+                  cat "$CN_REPORT"
+                  echo
+              fi
               echo '### Source'
-              echo "- AU: rebuilt via \`tools/build_db.py\` on $(date -u +'%Y-%m-%d %H:%M UTC')"
+              echo "- AU: rebuilt via \`tools/build_db.py --region au\` on $(date -u +'%Y-%m-%d %H:%M UTC')"
               echo "  - Fetchers: NSW + VIC + QLD + WA + ACT (official) + OSM (cross-verify)"
               echo "  - Output: v3 binary with per-record source_mask + confidence"
-              echo "- CN: rebuilt via legacy \`tools/prepare_speed_db.py\` (OSM-only, v2)"
+              echo "- CN: rebuilt via \`tools/build_db.py --region cn\`"
+              echo "  - Fetchers: cn_osm only (no open gov data; see tools/fetchers/cn_unavailable.py)"
+              echo "  - OSM lifted to \`OFFICIAL_BITS_CN\` -> single-source segments land at OFFICIAL_ONLY"
+              echo "  - Cities: configured in tools/speed_db_config.yaml (currently Xi'an + Shanghai tiles)"
               echo 'EOF'
           } >> "$GITHUB_OUTPUT"
 
-      # Score the candidate against the stashed baseline. Always
-      # writes /tmp/health.json with the verdict + supporting numbers
-      # so the next step can read it deterministically.
+      # Score AU and CN independently; either region failing triggers
+      # human review for the whole PR.
       - name: Score auto-merge eligibility
         id: health
         run: |
-          NEW_JSON=$(ls -t data/quarantine/au_summary_*.json 2>/dev/null | head -1)
+          NEW_AU_JSON=$(ls -t data/quarantine/au_summary_*.json 2>/dev/null | head -1)
+          NEW_CN_JSON=$(ls -t data/quarantine/cn_summary_*.json 2>/dev/null | head -1)
+
           python3 tools/db_health.py \
-              ${{ steps.baseline.outputs.old_db && format('--old-db {0}', steps.baseline.outputs.old_db) || '' }} \
-              ${{ steps.baseline.outputs.old_summary && format('--old-summary {0}', steps.baseline.outputs.old_summary) || '' }} \
+              ${{ steps.baseline.outputs.old_au_db && format('--old-db {0}', steps.baseline.outputs.old_au_db) || '' }} \
+              ${{ steps.baseline.outputs.old_au_summary && format('--old-summary {0}', steps.baseline.outputs.old_au_summary) || '' }} \
               --new-db data/speed_zones.db \
-              --new-summary "$NEW_JSON" \
-              --output /tmp/health.json
-          # Surface the bool and the human-readable reason both as step
-          # outputs so the PR step can label conditionally and the merge
-          # step can guard on safe_to_automerge alone.
-          SAFE=$(python3 -c "import json; print('true' if json.load(open('/tmp/health.json'))['safe_to_automerge'] else 'false')")
-          REASON=$(python3 -c "import json; print(json.load(open('/tmp/health.json'))['reason'])")
-          echo "safe=$SAFE" >> "$GITHUB_OUTPUT"
-          echo "reason=$REASON" >> "$GITHUB_OUTPUT"
-          echo "Auto-merge eligibility: $SAFE ($REASON)"
+              --new-summary "$NEW_AU_JSON" \
+              --output /tmp/health_au.json
+
+          python3 tools/db_health.py \
+              ${{ steps.baseline.outputs.old_cn_db && format('--old-db {0}', steps.baseline.outputs.old_cn_db) || '' }} \
+              ${{ steps.baseline.outputs.old_cn_summary && format('--old-summary {0}', steps.baseline.outputs.old_cn_summary) || '' }} \
+              --new-db data/speed_zones_cn.db \
+              --new-summary "$NEW_CN_JSON" \
+              --output /tmp/health_cn.json
+
+          # One Python invocation merges the two verdicts and writes
+          # combined JSON + the step outputs the next steps consume.
+          python3 - <<'PY'
+          import json, os
+          au = json.load(open('/tmp/health_au.json'))
+          cn = json.load(open('/tmp/health_cn.json'))
+          safe = bool(au['safe_to_automerge']) and bool(cn['safe_to_automerge'])
+          if safe:
+              reason = 'AU+CN both clean: ' + au['reason']
+          else:
+              parts = []
+              if not au['safe_to_automerge']:
+                  parts.append(f"AU: {au['reason']}")
+              if not cn['safe_to_automerge']:
+                  parts.append(f"CN: {cn['reason']}")
+              reason = ' | '.join(parts)
+          json.dump({
+              'safe_to_automerge': safe,
+              'reason': reason,
+              'au': au, 'cn': cn,
+          }, open('/tmp/health.json', 'w'), indent=2)
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as fh:
+              fh.write(f"safe={'true' if safe else 'false'}\n")
+              fh.write(f"reason={reason}\n")
+          print(f'Auto-merge eligibility: {safe} ({reason})')
+          PY
 
       # Extend the PR body with the auto-merge verdict so a reviewer
       # who DOES open the PR (e.g. when safe=false) can see why.

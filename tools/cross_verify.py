@@ -85,6 +85,11 @@ SOURCE_BIT = {
 OFFICIAL_BITS = (SRC_BIT_VIC | SRC_BIT_NSW | SRC_BIT_QLD | SRC_BIT_WA
                  | SRC_BIT_SA | SRC_BIT_ACT | SRC_BIT_NT)
 
+# CN treats OSM as official because China has no open government
+# speed-limit dataset (see tools/fetchers/cn_unavailable.py). Promotion
+# to OFFICIAL_VERIFIED still requires a second source.
+OFFICIAL_BITS_CN = OFFICIAL_BITS | SRC_BIT_OSM
+
 # Spatial / value tolerances. Tuning notes inline so future bumps
 # carry their rationale forward.
 # Bumped 30 -> 80 -> 100 on 2026-05-20 chasing GitHub's 100 MB
@@ -169,19 +174,18 @@ class QuarantineRecord:
     note: str = ""
 
 
-def _classify(observations: list, all_bits: int) -> tuple[int, int, str]:
+def _classify(observations: list, all_bits: int,
+              official_bits: int = OFFICIAL_BITS) -> tuple[int, int, str]:
     """Pick (speed, confidence, note) from agreeing observations.
 
-    `observations` is a non-empty list of SpeedSegment-like objects with
-    .speed and .source -- all already known to be spatially co-located
-    via the caller's index.
+    `official_bits` selects the per-region "official" source set
+    (OFFICIAL_BITS for AU, OFFICIAL_BITS_CN for CN).
 
     Conflict handling: only CROSS-source disagreement triggers
-    quarantine. Within-source disagreement (e.g. ACT data has two
-    records at the same lat/lon with different speeds because the
-    upstream pipeline sampled both lanes of a road) is resolved by
-    taking the lower value -- it's a data-quality smell at the source,
-    not a sign one source is lying to us about the other.
+    quarantine. Within-source disagreement (the same source emitting
+    two different speeds at one point, e.g. dual-carriageway lane
+    samples) is resolved by taking the lower value -- safer for the
+    driver and a data-quality smell at the source.
     """
     # Per-source minimum speed. Resolves intra-source inconsistency
     # (the lower value being the safer driver-facing display) BEFORE
@@ -206,18 +210,23 @@ def _classify(observations: list, all_bits: int) -> tuple[int, int, str]:
     # faster limit than any source observed.
     chosen = distinct_per_source[0]
 
-    has_official = bool(all_bits & OFFICIAL_BITS)
+    has_official = bool(all_bits & official_bits)
     has_osm = bool(all_bits & SRC_BIT_OSM)
     n_sources = bin(all_bits).count("1")
+    # CN-only branch: OSM standing alone counts as official.
+    # AU passes OFFICIAL_BITS without OSM, so this stays False there.
+    osm_is_official = bool(official_bits & SRC_BIT_OSM)
 
     if n_sources == 1:
+        if osm_is_official and all_bits == SRC_BIT_OSM:
+            return (chosen, CONFIDENCE_OFFICIAL_ONLY, "cn-osm-only")
         return (chosen, CONFIDENCE_SINGLE_SOURCE, "single")
     if has_official and has_osm:
         return (chosen, CONFIDENCE_OFFICIAL_VERIFIED, "official+osm")
     if has_official:
         # Multiple official sources but no OSM -- still treat as
         # "verified" only when at least 2 official agree.
-        n_official = bin(all_bits & OFFICIAL_BITS).count("1")
+        n_official = bin(all_bits & official_bits).count("1")
         if n_official >= 2:
             return (chosen, CONFIDENCE_OFFICIAL_VERIFIED, "official+official")
         return (chosen, CONFIDENCE_OFFICIAL_ONLY, "official-only")
@@ -225,12 +234,17 @@ def _classify(observations: list, all_bits: int) -> tuple[int, int, str]:
     return (chosen, CONFIDENCE_CROSS_NO_OFFICIAL, "cross-no-official")
 
 
-def verify_segments(segments: Iterable) -> tuple[list[VerifiedRecord],
-                                                 list[QuarantineRecord]]:
+def verify_segments(segments: Iterable,
+                    official_bits: int = OFFICIAL_BITS,
+                    ) -> tuple[list[VerifiedRecord],
+                               list[QuarantineRecord]]:
     """Run cross-verification over a stream of SpeedSegment.
 
-    Returns (verified, quarantine). Verified list goes to the DB
-    writer; quarantine list goes to the audit report.
+    `official_bits` selects the per-region "official" source set
+    (default AU). CN callers pass `OFFICIAL_BITS_CN`.
+
+    Returns (verified, quarantine). Verified goes to the DB writer;
+    quarantine goes to the audit report.
 
     The algorithm is a single pass:
       1. Build a coarse spatial index keyed by (gi, gj) cells.
@@ -287,7 +301,8 @@ def verify_segments(segments: Iterable) -> tuple[list[VerifiedRecord],
             bit = SOURCE_BIT.get(segs[k].source, 0)
             all_bits |= bit
 
-        speed, confidence, note = _classify([segs[k] for k in group], all_bits)
+        speed, confidence, note = _classify([segs[k] for k in group],
+                                            all_bits, official_bits)
 
         if speed < 0:
             # Quarantine -- write one record per location with the full

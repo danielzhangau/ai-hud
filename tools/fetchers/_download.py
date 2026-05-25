@@ -8,10 +8,12 @@ robustly than the stdlib's urllib in CI runners.
 unless `force=True`. The fetcher CLIs expose `--force` to override.
 
 `archive_raw()` compresses the downloaded blob into
-    data/raw/au/<state>/<date>_<name>.gz
+    data/raw/<region>/<state>/<date>_<name>.gz
 so a later cross-verify run can diff month-over-month or roll back
 when an upstream provider ships bad data. .gz instead of .zst keeps
-the toolchain to stock python + system tools.
+the toolchain to stock python + system tools. `region` defaults to
+"au" for back-compat with the original AU-only call sites; CN
+fetchers pass `region="cn"` to keep raw snapshots disjoint.
 """
 from __future__ import annotations
 
@@ -56,17 +58,38 @@ def download(url: str, dest: Path, force: bool = False,
     return dest
 
 
-def archive_raw(src: Path, state: str, basename: str) -> Path:
-    """Compress `src` into data/raw/au/<state>/<YYYY-MM-DD>_<basename>.gz.
-
-    Returns the archive path. Idempotent within a single day -- a
-    second call with the same args overwrites the prior archive.
-    """
+def _archive_path(state: str, basename: str, region: str) -> Path:
     date = time.strftime("%Y-%m-%d")
-    out_dir = RAW_ROOT / "au" / state.lower()
+    out_dir = RAW_ROOT / region.lower() / state.lower()
     out_dir.mkdir(parents=True, exist_ok=True)
-    out_path = out_dir / f"{date}_{basename}.gz"
+    return out_dir / f"{date}_{basename}.gz"
+
+
+def archive_raw(src: Path, state: str, basename: str,
+                region: str = "au") -> Path:
+    """Compress `src` into data/raw/<region>/<state>/<YYYY-MM-DD>_<basename>.gz.
+
+    Returns the archive path. Idempotent within a single day. `region`
+    defaults to "au" so existing AU gov fetchers keep working without
+    changes.
+    """
+    out_path = _archive_path(state, basename, region)
     with src.open("rb") as fin, gzip.open(out_path, "wb",
                                          compresslevel=6) as fout:
         shutil.copyfileobj(fin, fout, length=1024 * 1024)
+    return out_path
+
+
+def archive_bytes(data: bytes, state: str, basename: str,
+                  region: str = "au") -> Path:
+    """Same as `archive_raw` but takes bytes directly.
+
+    Lets OSM-style fetchers gzip per-query responses (Overpass returns
+    in-memory bytes) without spilling to /tmp first -- the previous
+    pattern accumulated decoded copies of every query's response in
+    a list before writing one combined archive.
+    """
+    out_path = _archive_path(state, basename, region)
+    with gzip.open(out_path, "wb", compresslevel=6) as fout:
+        fout.write(data)
     return out_path

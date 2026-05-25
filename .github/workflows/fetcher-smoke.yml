@@ -67,6 +67,13 @@ jobs:
           # 64 LGAs via CKAN datastore API runs ~3-5 min; --limit caps
           # CI time while still exercising the multi-page pagination.
           - { name: qld, module: au_qld, min: 50000,   max: 250000,  limit: "--limit 200000" }
+          # CN OSM: only Shanghai_W in the smoke (smallest of the SH
+          # tiles, fastest Overpass round-trip). Multi-tile coverage
+          # is exercised end-to-end by the monthly db-refresh job;
+          # smoke just needs to prove the fetcher + Overpass UA still
+          # work. Band picked from 2026-05-25 baseline (one SH tile
+          # at 100m sampling yields ~5-20K segments).
+          - { name: cn,  module: cn_osm, min: 3000,    max: 80000,   limit: "--cities Shanghai_W" }
     name: ${{ matrix.name }}
     steps:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5

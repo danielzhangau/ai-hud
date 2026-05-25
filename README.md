@@ -84,11 +84,15 @@ ai-hud/
 ├── data/                         # Offline databases (regenerated monthly via CI)
 │   └── speed_zones*.db / speed_cameras*.db    # AU + CN
 ├── tools/                        # Build / provision helpers
-│   ├── prepare_speed_db.py       #   Rebuild dbs from OSM (used by CI cron)
+│   ├── build_db.py               #   Speed DB builder: fetchers + cross_verify + v3 binary (AU + CN)
+│   ├── prepare_speed_db.py       #   Legacy/cameras-only path (delegated to by build_db.py)
+│   ├── cross_verify.py           #   Per-region OFFICIAL_BITS confidence ladder
+│   ├── db_health.py              #   PR auto-merge eligibility scorer
+│   ├── fetchers/                 #   Per-source fetcher modules (au_* + cn_osm + *_unavailable)
 │   ├── build_update_bundle.py    #   Package OTA bundles
 │   ├── build_launcher_disk.sh    #   Build the 64 MB virtual-USB FAT32 image
 │   ├── provision.sh              #   One-shot factory deploy
-│   └── speed_db_config.yaml      #   Per-region OSM source config
+│   └── speed_db_config.yaml      #   Per-region city bbox + known_cameras config
 ├── mac-launcher/                 # Customer-side macOS launcher (.app)
 │   └── src/{launch.sh, updater.py, flash_firmware.py, ...}
 ├── windows-launcher/             # Customer-side Windows launcher (.bat + .ps1)
@@ -304,7 +308,8 @@ actions are SHA-pinned and tracked by Dependabot.
 | **Model Convert** | `model-convert.yml` | Manual dispatch | Convert ONNX model to RKNN INT8 |
 | **SDK Build** | `sdk-build.yml` | Manual dispatch / called by release | Full Luckfox SDK firmware build (~1h44m) |
 | **Release** | `release.yml` | `v*.*.*` tag push | Build firmware, package OTA bundle, generate changelog via git-cliff, publish GitHub Release |
-| **DB Refresh** | `db-refresh.yml` | Cron 03:00 UTC on 1st of month | Rebuild AU/CN speed databases from OSM, open auto-PR |
+| **DB Refresh** | `db-refresh.yml` | Cron 03:00 UTC on 1st of month | Rebuild AU/CN speed databases (zones via `build_db.py` + cross_verify, cameras via `prepare_speed_db.py`), open auto-PR with per-region health verdict |
+| **Fetcher Smoke** | `fetcher-smoke.yml` | PR touching `tools/fetchers/**` + daily cron | Probe each fetcher against live upstream, range-check segment counts (catches OSM/gov schema drift early) |
 
 Detailed lifecycle:
 
@@ -313,10 +318,20 @@ Detailed lifecycle:
   Release with `update.img`, `update-bundle-v0.2.0.zip`, `*.db`, and
   `SHA256SUMS`. From there it's automatically discoverable by the
   customer launcher.
-- **A database refresh** opens a PR for human review (OSM data is
-  occasionally vandalised; a 30%+ region size delta usually means
-  something went wrong upstream). The PR's body contains pre/post
-  zone-count diffs.
+- **A database refresh** opens a PR. AU runs every state fetcher
+  (NSW/VIC/QLD/WA/ACT) plus OSM cross-verify, lifting agreements to
+  `OFFICIAL_VERIFIED`. CN runs `cn_osm` alone -- China has no open
+  government dataset (see `tools/fetchers/cn_unavailable.py`) -- and
+  the policy treats OSM as the de-facto official source so Xi'an +
+  Shanghai render numeric limits instead of `--`. `db_health.py`
+  scores AU and CN independently; both must clear delta + quarantine
+  thresholds for auto-merge, otherwise the PR sits for human review.
+  PR body shows pre/post zone counts, per-region cross-verification
+  reports, and the combined health verdict.
+
+  Add a new CN city: edit `regions.cn.cities` in
+  `tools/speed_db_config.yaml`, then `python3 tools/build_db.py
+  --region cn` locally or wait for the next cron run.
 
 See `docs/dev-workflow.md` for the day-to-day developer loop and the
 release procedure.
