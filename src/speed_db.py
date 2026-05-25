@@ -555,35 +555,22 @@ class QueryResult:
 NPU_CONFIDENCE_MIN = 0.80       # minimum confidence when DB has data
 NPU_CONFIDENCE_NO_DB = 0.75     # minimum confidence when DB is silent
 
-# Sliding-window voting (replaces the legacy "strict consecutive N"
-# accumulator). Best practice from ADAS TSR literature: require N
-# matching detections within a sliding window of M polls, not strict
-# consecutivity -- a real sign briefly occluded by foliage / a passing
-# truck still attests in M-1 of M frames, while a stray phantom from
-# motion blur burns one slot but does not break a real candidate.
-#
-# Window timing at the ~1 Hz Python poll rate (GPS RMC-driven):
-#   8s window  -> ~8 polls observed  -- comfortably > WINDOW_SIZE
-#   WINDOW_SIZE=6 caps the ring buffer so a slow drive (RMC stalls)
-#                  cannot grow it unboundedly.
-#   WINDOW_MATCH=4 = "majority within window" -- knocks out 2-frame
-#                    transient flickers while keeping accept latency
-#                    bounded (4 polls = ~4s).
+# Sliding-window N-of-M voting at the ~1 Hz Python poll rate.
+# WINDOW_SIZE caps the ring buffer (slow RMC cannot grow it unbounded);
+# WINDOW_MATCH = majority within window kills 1-2 frame flickers while
+# keeping accept latency to ~4 polls.
 NPU_VOTE_WINDOW_S = 8.0
 NPU_WINDOW_SIZE = 6
 NPU_WINDOW_MATCH = 4            # AKA `npu_vote_required` in ai_hud.conf
 
-# Release hysteresis: while an override is live, this many consecutive
-# trusted-but-different NPU detections force-drop it without waiting
-# for the slower acceptance threshold of the new candidate. Tuned to
-# 3 polls (~3s) so a genuine zone-boundary read is reflected quickly,
-# but a single mis-classification doesn't flip the limit.
+# While an override is live, this many consecutive trusted-but-different
+# detections force-drop it -- reflects a zone-boundary read faster than
+# waiting for the new candidate to accumulate WINDOW_MATCH on its own.
 NPU_RELEASE_DISSENT = 3
 
-NPU_OVERRIDE_TIMEOUT = 20.0     # seconds NPU may go silent before the
-                                # override is dropped (covers the
-                                # "drove past sign, no successor" case
-                                # neither acceptance nor dissent catches)
+# Drop the override when NPU has been silent this long (covers the
+# "drove past sign, no successor" case dissent never sees).
+NPU_OVERRIDE_TIMEOUT = 20.0
 
 
 class SpeedFusion:
@@ -636,8 +623,6 @@ class SpeedFusion:
                                  else NPU_CONFIDENCE_NO_DB)
         self.window_match = (vote_required if vote_required is not None
                              else NPU_WINDOW_MATCH)
-        # Alias kept for log lines and external readers
-        self.vote_required = self.window_match
         self.override_timeout = (override_timeout if override_timeout is not None
                                  else NPU_OVERRIDE_TIMEOUT)
         self.camera_alert_radius = (camera_alert_radius
@@ -650,16 +635,13 @@ class SpeedFusion:
         self.release_dissent = (release_dissent if release_dissent is not None
                                 else NPU_RELEASE_DISSENT)
 
-        # Sliding-window state.
-        # _npu_history: deque of (timestamp, value). value=0 means
-        # "this poll saw no qualifying NPU detection" -- recording it
-        # is essential so the window naturally ages out absent frames
-        # and a candidate must hold its share against silence.
+        # value=0 entries in _npu_history mark "no qualifying NPU
+        # detection this poll" -- recording silence is what makes a
+        # candidate hold majority against gaps.
         self._npu_history = _deque()
-        self._npu_override = 0        # accepted NPU override (0 = none)
-        self._npu_override_time = 0.0 # last time override was confirmed
-        self._last_db_limit = 0       # last DB hit (for zone-change reset)
-        # Release-hysteresis: count of consecutive dissenting polls
+        self._npu_override = 0
+        self._npu_override_time = 0.0
+        self._last_db_limit = 0
         self._npu_dissent_value = 0
         self._npu_dissent_votes = 0
 
@@ -671,25 +653,15 @@ class SpeedFusion:
                db_confidence=None):
         """Update fusion state and return effective speed limit.
 
-        Args:
-            db_limit: speed limit from database (0 = unknown / GPS lost
-                / no coverage). Pass 0 when GPS is invalid so the NPU
-                drives the UI alone -- do NOT call reset() in that case
-                or in-tunnel NPU votes will be discarded.
-            npu_limit: speed limit from NPU detection (0 = no detection)
-            npu_confidence: NPU confidence (0.0 - 1.0)
-            now: current time (default: time.time())
-            db_confidence: CONFIDENCE_* enum for db_limit. Optional --
-                callers passing None get the legacy behaviour (DB is
-                trusted regardless of source breakdown), matching v1/v2
-                .db files that have no per-record confidence.
+        db_limit=0 signals "no GPS / no coverage" -- callers must use
+        this path (not reset()) when GPS is invalid, otherwise in-tunnel
+        NPU votes are discarded.
 
-        Returns:
-            int: effective speed limit in km/h. When db_confidence is
-            CONFIDENCE_SINGLE_SOURCE (only OSM, no official source),
-            the .source field becomes "DB_LOW_CONFIDENCE" and the
-            caller is expected to render "--" rather than the numeric
-            value (per "宁可不报").
+        db_confidence=None is the legacy contract: DB is trusted
+        regardless of source breakdown, matching v1/v2 .db files. Pass
+        CONFIDENCE_* on v3+ DBs to enable the "宁可不报" downgrade --
+        SINGLE_SOURCE hits become SOURCE_DB_LOW_CONFIDENCE and the
+        caller renders "--".
         """
         if now is None:
             now = _time.time()

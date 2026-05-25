@@ -76,74 +76,68 @@ static inline int hud_ipc_write(int speed_limit, int camera, float confidence)
 }
 
 /*
- * Convert detection result (class_id + confidence) to IPC write.
- *
+ * Pick the top sign + top camera detection from a frame's raw output.
+ * Out params receive 0 / 0.0f when no detection of that kind passed.
+ */
+static inline void hud_ipc_pick_frame_top(
+    int num_detections,
+    const int *class_ids,
+    const float *confidences,
+    int *sign_limit, float *sign_conf,
+    int *camera, float *camera_conf)
+{
+    *sign_limit = 0; *sign_conf = 0.0f;
+    *camera = 0;     *camera_conf = 0.0f;
+    for (int i = 0; i < num_detections; i++) {
+        int cls = class_ids[i];
+        float conf = confidences[i];
+        if (cls >= 0 && cls < SIGN_SPEED_COUNT) {
+            if (conf > *sign_conf) {
+                *sign_conf = conf;
+                *sign_limit = SIGN_SPEEDS[cls];
+            }
+        } else if (cls == CLASS_SPEED_CAMERA) {
+            *camera = 1;
+            if (conf > *camera_conf)
+                *camera_conf = conf;
+        }
+    }
+}
+
+/*
  * Raw variant: writes the per-frame top detection straight to IPC
- * without any inter-frame voting. Kept for debugging and tooling
- * that wants the unfiltered NPU truth.
- *
- * Typical inference-loop usage should call hud_ipc_update_smoothed()
- * instead, which applies a small N-of-M ring buffer to suppress
- * single-frame phantoms before they reach the Python fusion stage.
+ * without inter-frame voting. Kept for debugging / tooling that wants
+ * the unfiltered stream; the inference loop should call
+ * hud_ipc_update_smoothed() instead.
  */
 static inline void hud_ipc_update_from_detections(
     int num_detections,
     const int *class_ids,
     const float *confidences)
 {
-    int best_sign_limit = 0;
-    float best_sign_conf = 0.0f;
-    int camera = 0;
-    float camera_conf = 0.0f;
-
-    for (int i = 0; i < num_detections; i++) {
-        int cls = class_ids[i];
-        float conf = confidences[i];
-
-        if (cls >= 0 && cls < SIGN_SPEED_COUNT) {
-            /* Speed sign -- pick highest confidence */
-            if (conf > best_sign_conf) {
-                best_sign_conf = conf;
-                best_sign_limit = SIGN_SPEEDS[cls];
-            }
-        } else if (cls == CLASS_SPEED_CAMERA) {
-            camera = 1;
-            if (conf > camera_conf)
-                camera_conf = conf;
-        }
-    }
-
-    float top_conf = best_sign_conf > camera_conf ? best_sign_conf : camera_conf;
-    hud_ipc_write(best_sign_limit, camera, top_conf);
+    int sign_limit, camera;
+    float sign_conf, camera_conf;
+    hud_ipc_pick_frame_top(num_detections, class_ids, confidences,
+                           &sign_limit, &sign_conf, &camera, &camera_conf);
+    float top_conf = sign_conf > camera_conf ? sign_conf : camera_conf;
+    hud_ipc_write(sign_limit, camera, top_conf);
 }
 
 /*
  * Smoothed variant: N-of-M sliding-window vote over the last
- * HUD_IPC_SMOOTH_WIN inference frames before the IPC write.
+ * HUD_IPC_SMOOTH_WIN inference frames. Composes with the Python-side
+ * 4-of-6 fusion window to give two-stage hysteresis:
+ *   C ring  (5 frames, 3 match): 600 ms-3 s accept depending on FPS
+ *   Python  (6 polls,  4 match): adds ~3-4 s confirmation at 1 Hz RMC
  *
- * Suppresses single-frame phantoms (motion blur, partial occlusion,
- * confused background patches) so the Python-side fusion sees a
- * pre-stabilized stream. The Python fusion still applies its own
- * 4-of-6 sliding window on top -- the two filters compose, with
- * different time constants matched to their respective tick rates:
+ * On winner_count < HUD_IPC_SMOOTH_MATCH writes speed_limit=0 so the
+ * Python window naturally treats that poll as absent.
  *
- *   C ring (HUD_IPC_SMOOTH_WIN=5 frames, HUD_IPC_SMOOTH_MATCH=3):
- *     - At 5 FPS (highway): 1 s window, accepts in >=600 ms
- *     - At 1 FPS (urban) : 5 s window, accepts in >=3 s
- *   Python fusion (8 s window, 4 matches at ~1 Hz GPS RMC):
- *     - Adds 3-4 s of cross-source confirmation on top of the C ring
+ * Camera flag is NOT smoothed -- transient alerts favor false positives
+ * over false negatives (a wrongly-warned driver just eases off).
  *
- * On winner_count < HUD_IPC_SMOOTH_MATCH the smoothed output writes
- * speed_limit=0 (i.e. "no stable detection") so the Python side
- * naturally treats the slot as an absent frame in its own window.
- *
- * Camera flag is intentionally NOT smoothed: speed-camera warnings
- * are transient alerts where a false negative is worse than a false
- * positive (a falsely warned driver just lifts the throttle).
- *
- * Thread-safety: implemented with file-scope static state in
- * hud_ipc.c. Safe under the single NPU inference thread in
- * rknn_detect.c; do NOT call from multiple threads concurrently.
+ * Thread-safety: file-scope static state in hud_ipc.c, safe only under
+ * the single NPU inference thread.
  */
 #define HUD_IPC_SMOOTH_WIN    5
 #define HUD_IPC_SMOOTH_MATCH  3

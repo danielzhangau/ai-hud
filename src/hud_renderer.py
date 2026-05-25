@@ -47,39 +47,33 @@ SIGN_CX = FB_W - 65
 SIGN_CY = FB_H // 2 + 10
 
 
+def _draw_limit_sign(fb, speed_limit, low_confidence):
+    """Paint the red-ring speed-limit sign at (SIGN_CX, SIGN_CY).
+
+    `low_confidence=True` renders "--" -- 宁可不报 policy for
+    SINGLE_SOURCE DB hits, no-signal, and GPS-unfixed states.
+    """
+    fb.fill_circle(SIGN_CX, SIGN_CY, SIGN_R, COL_LIMIT_RING)
+    fb.fill_circle(SIGN_CX, SIGN_CY, SIGN_R - 5, COL_LIMIT_BG)
+    limit_str = "--" if low_confidence else str(speed_limit)
+    scale = 2
+    tw = fb.measure_text(limit_str, scale)
+    th = GLYPH_H * scale
+    fb.draw_text(limit_str,
+                 SIGN_CX - tw // 2, SIGN_CY - th // 2,
+                 COL_LIMIT_TEXT, scale)
+
+
 def _build_base_layer(fb, speed_limit, low_confidence=False):
     """Pre-render the static background layer: bg + arc track + limit sign.
 
-    Call once at startup or when speed_limit changes.  Returns a snapshot
-    (bytearray copy) of the buffer that can be blitted back each frame
-    instead of redrawing.
-
-    When `low_confidence` is True we keep the sign chrome but render
-    "--" instead of a number -- the DB hit was single-source / OSM-only
-    and the project's "宁可不报" policy forbids displaying a value the
-    cross-verify pipeline didn't elevate to OFFICIAL_ONLY or higher.
+    Returns a snapshot blitted back each frame instead of redrawing.
     """
     fb.clear(COL_BG)
-
-    # Arc gauge background track
     fb.draw_thick_arc(ARC_CX, ARC_CY, ARC_R, ARC_START, ARC_END_FULL,
                       COL_GAUGE_BG, width=ARC_WIDTH)
-
-    # Speed limit sign - red ring + white fill + number
-    fb.fill_circle(SIGN_CX, SIGN_CY, SIGN_R, COL_LIMIT_RING)
-    fb.fill_circle(SIGN_CX, SIGN_CY, SIGN_R - 5, COL_LIMIT_BG)
-
-    limit_str = "--" if low_confidence else str(speed_limit)
-    limit_scale = 2
-    limit_tw = fb.measure_text(limit_str, limit_scale)
-    limit_th = GLYPH_H * limit_scale
-    limit_tx = SIGN_CX - limit_tw // 2
-    limit_ty = SIGN_CY - limit_th // 2
-    fb.draw_text(limit_str, limit_tx, limit_ty, COL_LIMIT_TEXT, limit_scale)
-
-    # Thin separator line above satellite info
+    _draw_limit_sign(fb, speed_limit, low_confidence)
     fb.fill_rect(20, FB_H - 55, FB_W - 40, 1, COL_DIM)
-
     return bytearray(fb.buf)
 
 
@@ -98,9 +92,8 @@ class HUDState:
         self.base_layer = None
         self.speed_limit = -1
         self.camera_detected = False
-        # Tracks the renderer-visible confidence flag so a toggle between
-        # "show number" and "show --" forces a base-layer rebuild even
-        # when the numeric limit hasn't changed.
+        # Tracked so a number->-- toggle triggers a base-layer rebuild
+        # even when the numeric limit is unchanged.
         self.limit_low_confidence = False
 
 
@@ -125,19 +118,12 @@ def render_hud(fb, gps, state, detect, default_speed_limit):
     speed = gps.speed_kmh if gps.valid else 0.0
     speed_int = int(round(speed))
 
-    # Dynamic speed limit from NPU detection
     current_limit = detect.speed_limit if detect else default_speed_limit
     camera = detect.camera_detected if detect else False
-    # low_conf = True means we don't trust the numeric limit enough to
-    # surface it. Triggered by DB_LOW_CONFIDENCE (single-source OSM),
-    # SOURCE_DEFAULT (no DB hit + no NPU detection) or GPS unfixed.
-    # Falls back to False so callers without DetectionState still work.
-    low_conf = bool(getattr(detect, "limit_low_confidence", False)
-                    if detect else False)
+    low_conf = detect.limit_low_confidence if detect else False
 
-    # Over-limit hint suppressed when low_conf -- if we're showing "--"
-    # we cannot honestly claim the driver is over any limit. Otherwise
-    # render speed numeric against current_limit (DB or NPU vote).
+    # Suppress over-limit highlight when low_conf -- can't honestly
+    # claim "over" a limit we won't display.
     over_limit = (not low_conf) and speed_int > current_limit
 
     # --- Delta check: skip full redraw if nothing changed ---
@@ -185,15 +171,8 @@ def render_hud(fb, gps, state, detect, default_speed_limit):
         tip_y = int(ARC_CY + ARC_R * math.sin(tip_rad))
         fb.fill_circle(tip_x, tip_y, 6, arc_color)
 
-    # --- Re-draw limit sign on top of arc (arc overlaps sign at 349-378 deg) ---
-    # Must mirror _build_base_layer's "--" rule, otherwise this pass would
-    # paint the numeric default back over the "--" the base layer drew.
-    fb.fill_circle(SIGN_CX, SIGN_CY, SIGN_R, COL_LIMIT_RING)
-    fb.fill_circle(SIGN_CX, SIGN_CY, SIGN_R - 5, COL_LIMIT_BG)
-    _limit_str = "--" if low_conf else str(current_limit)
-    _limit_tw = fb.measure_text(_limit_str, 2)
-    fb.draw_text(_limit_str, SIGN_CX - _limit_tw // 2,
-                 SIGN_CY - GLYPH_H, COL_LIMIT_TEXT, 2)
+    # Re-draw sign on top of arc (arc overlaps sign at 349-378 deg)
+    _draw_limit_sign(fb, current_limit, low_conf)
 
     # --- Speed number (huge, centered, shifted slightly left) ---
     speed_str = str(speed_int)

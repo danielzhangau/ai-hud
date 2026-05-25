@@ -33,14 +33,10 @@ PARAM_DEFS = {
     # speed_db.NPU_CONFIDENCE_* comments for the rationale.
     ("fusion", "npu_confidence_min"):   (float, 0.80, 0.10, 1.00),
     ("fusion", "npu_confidence_no_db"): (float, 0.75, 0.10, 1.00),
-    # npu_vote_required is the LEGACY name for window_match, kept so
-    # operator-edited ai_hud.conf doesn't need migration.
+    # npu_vote_required is the ai_hud.conf name for window_match.
     ("fusion", "npu_vote_required"):    (int,   4,    1,    10),
     ("fusion", "npu_override_timeout"): (float, 20.0, 5.0,  120.0),
     ("fusion", "camera_alert_radius"):  (int,   800,  100,  2000),
-    # Sliding-window voting parameters added 2026-05-25 along with the
-    # N-of-M + release-hysteresis rewrite. See speed_db.NPU_VOTE_WINDOW_S
-    # and friends for the algorithm rationale.
     ("fusion", "npu_vote_window_s"):    (float, 8.0,  2.0,  30.0),
     ("fusion", "npu_window_size"):      (int,   6,    3,    15),
     ("fusion", "npu_release_dissent"):  (int,   3,    1,    10),

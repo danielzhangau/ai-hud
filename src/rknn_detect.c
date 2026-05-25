@@ -553,20 +553,10 @@ static void *inference_thread_func(void *arg) {
                 memcpy(&ctx->det_result, &local_result, sizeof(local_result));
                 pthread_mutex_unlock(&ctx->result_mutex);
 
-                /*
-                 * Write IPC EVERY frame -- including count==0 -- so the
-                 * Python HUD observes the "no detection" transition.
-                 * Previously this gate caused stale detections to persist
-                 * in /tmp/ai_hud_detect indefinitely after the sign left
-                 * the frame, since the file mtime never changed.
-                 *
-                 * Use the SMOOTHED writer: a small N-of-M ring inside
-                 * hud_ipc_update_smoothed suppresses single-frame
-                 * phantoms before they reach the Python fusion layer.
-                 * count==0 still feeds the ring (as an "absent" slot),
-                 * so a stable real sign survives a brief occlusion but
-                 * a one-shot misclassification gets aged out.
-                 */
+                /* Write IPC every frame including count==0 -- the
+                 * count==0 sample is what tells the smoothing ring
+                 * (and the Python fusion window) that the sign left
+                 * the frame. */
                 int cls_ids[OBJ_NUMB_MAX_SIZE];
                 float confs[OBJ_NUMB_MAX_SIZE];
                 for (int i = 0; i < local_result.count; i++) {
