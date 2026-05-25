@@ -128,15 +128,17 @@ def render_hud(fb, gps, state, detect, default_speed_limit):
     # Dynamic speed limit from NPU detection
     current_limit = detect.speed_limit if detect else default_speed_limit
     camera = detect.camera_detected if detect else False
-    # When the fused source is DB_LOW_CONFIDENCE we keep current_limit
-    # for the over-limit logic but render "--" on the sign. Falls back
-    # to False so callers that don't pass DetectionState still work.
+    # low_conf = True means we don't trust the numeric limit enough to
+    # surface it. Triggered by DB_LOW_CONFIDENCE (single-source OSM),
+    # SOURCE_DEFAULT (no DB hit + no NPU detection) or GPS unfixed.
+    # Falls back to False so callers without DetectionState still work.
     low_conf = bool(getattr(detect, "limit_low_confidence", False)
                     if detect else False)
 
-    # Over-limit hint stays based on the numeric value -- if the driver
-    # is doing 80 in a possibly-50 zone we still highlight the speed.
-    over_limit = speed_int > current_limit
+    # Over-limit hint suppressed when low_conf -- if we're showing "--"
+    # we cannot honestly claim the driver is over any limit. Otherwise
+    # render speed numeric against current_limit (DB or NPU vote).
+    over_limit = (not low_conf) and speed_int > current_limit
 
     # --- Delta check: skip full redraw if nothing changed ---
     limit_changed = (state.speed_limit != current_limit
@@ -184,9 +186,11 @@ def render_hud(fb, gps, state, detect, default_speed_limit):
         fb.fill_circle(tip_x, tip_y, 6, arc_color)
 
     # --- Re-draw limit sign on top of arc (arc overlaps sign at 349-378 deg) ---
+    # Must mirror _build_base_layer's "--" rule, otherwise this pass would
+    # paint the numeric default back over the "--" the base layer drew.
     fb.fill_circle(SIGN_CX, SIGN_CY, SIGN_R, COL_LIMIT_RING)
     fb.fill_circle(SIGN_CX, SIGN_CY, SIGN_R - 5, COL_LIMIT_BG)
-    _limit_str = str(current_limit)
+    _limit_str = "--" if low_conf else str(current_limit)
     _limit_tw = fb.measure_text(_limit_str, 2)
     fb.draw_text(_limit_str, SIGN_CX - _limit_tw // 2,
                  SIGN_CY - GLYPH_H, COL_LIMIT_TEXT, 2)

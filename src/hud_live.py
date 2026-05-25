@@ -396,9 +396,12 @@ class DetectionState:
         self.camera_detected = False                  # post-fusion display value
         self.confidence = 0.0                          # mirrors raw_npu_confidence
         # True when fusion source is DB_LOW_CONFIDENCE (single-source / OSM-only
-        # segment). hud_renderer renders "--" instead of the number in that
-        # case so the driver never sees an unverified limit per "宁可不报".
-        self.limit_low_confidence = False
+        # segment) OR SOURCE_DEFAULT (no DB hit AND no qualifying NPU detection)
+        # OR GPS not yet fixed. hud_renderer renders "--" instead of the number
+        # in any of these cases -- "宁可不报" applied uniformly to "unverified"
+        # and "unknown". Defaults True so the very first frame (no GPS fix yet)
+        # already shows "--" instead of region default.
+        self.limit_low_confidence = True
         self.last_poll = 0
         self._last_mtime = 0
         self.npu_enabled = True  # user toggle for live detection
@@ -544,11 +547,13 @@ def main():
     SpeedFusion_cls = None
     fuse_camera_warning_fn = None
     SOURCE_DB_LOW_CONFIDENCE = "DB_LOW_CONFIDENCE"  # fallback if import fails
+    SOURCE_DEFAULT = "DEFAULT"                       # fallback if import fails
     try:
         from speed_db import SpeedDB as SpeedDB_cls
         from speed_db import SpeedFusion as SpeedFusion_cls
         from speed_db import fuse_camera_warning as fuse_camera_warning_fn
         from speed_db import SOURCE_DB_LOW_CONFIDENCE
+        from speed_db import SOURCE_DEFAULT
     except ImportError:
         print("Speed DB: module not available, using NPU only")
 
@@ -921,11 +926,13 @@ def main():
                         detect.raw_npu_speed_limit,
                         detect.raw_npu_confidence,
                         db_confidence=db_confidence)
-                    # Propagate the low-confidence flag for the renderer.
-                    # Only DB_LOW_CONFIDENCE downgrades the UI; NPU and
-                    # trusted DB results stay numeric.
-                    detect.limit_low_confidence = (
-                        speed_fusion.source == SOURCE_DB_LOW_CONFIDENCE)
+                    # Propagate the "do not render number" flag to the
+                    # renderer. Triggered for DB_LOW_CONFIDENCE (single-
+                    # source/OSM-only segment) AND SOURCE_DEFAULT (no DB hit
+                    # + no qualifying NPU detection). NPU and trusted DB
+                    # results stay numeric.
+                    detect.limit_low_confidence = speed_fusion.source in (
+                        SOURCE_DB_LOW_CONFIDENCE, SOURCE_DEFAULT)
 
                     # Fuse camera warning: DB proximity OR NPU detection
                     if fuse_camera_warning_fn is not None:
@@ -934,8 +941,20 @@ def main():
                             detect.raw_npu_camera)
                         detect.camera_detected = show_cam
                 elif speed_fusion and not gps.valid:
-                    # Lost GPS fix -- reset fusion state
-                    speed_fusion.reset()
+                    # Lost GPS fix -- DB is silent (no location to query)
+                    # but NPU can still read signs visually (tunnels with
+                    # cached signs, GPS-shadow scenarios). Feed fusion
+                    # with db_limit=0 so the sliding window keeps voting
+                    # and an NPU override can survive the GPS outage.
+                    # Camera DB warnings can't fire without a position,
+                    # so leave detect.camera_detected to NPU alone.
+                    detect.speed_limit = speed_fusion.update(
+                        0,
+                        detect.raw_npu_speed_limit,
+                        detect.raw_npu_confidence,
+                        db_confidence=None)
+                    detect.limit_low_confidence = speed_fusion.source in (
+                        SOURCE_DB_LOW_CONFIDENCE, SOURCE_DEFAULT)
 
                 # Render: CAM mode lets C binary draw full-screen camera
                 # (no Python overlay); HUD mode renders the full HUD.
