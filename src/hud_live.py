@@ -406,6 +406,16 @@ class DetectionState:
         self._last_mtime = 0
         self.npu_enabled = True  # user toggle for live detection
 
+    # If the C process stops writing IPC for this many seconds we treat
+    # raw_npu_* as untrusted and zero them so SpeedFusion stops voting
+    # on the frozen last value. The threshold must comfortably cover the
+    # slowest adaptive inference cadence in hud_ipc.h
+    # (hud_ipc_adaptive_sleep_ms: 5000ms at 0-5 km/h) plus headroom for
+    # an in-flight inference and write -- 8 seconds keeps a parked car
+    # from tripping the gate while a real C-side hang surfaces fast
+    # enough that the fusion 8s window naturally ages out the phantom.
+    NPU_STALE_THRESHOLD_S = 8.0
+
     def poll(self):
         """Read detection file if changed. Called from main loop.
 
@@ -413,6 +423,12 @@ class DetectionState:
         owned by SpeedFusion and updated by the caller. After the P1 fix
         the C side writes IPC every inference cycle (including count==0),
         so raw_npu_speed_limit reliably reflects "no detection" as 0.
+
+        Stale-state guard: if the IPC file hasn't been touched for
+        >= NPU_STALE_THRESHOLD_S the C process is presumed dead/hung.
+        We zero raw_npu_* so SpeedFusion stops voting on the frozen
+        last value (otherwise a phantom override would persist forever
+        because the mtime gate below would never re-read the file).
         """
         if not self.npu_enabled:
             return  # NPU disabled, skip polling
@@ -423,6 +439,32 @@ class DetectionState:
 
         try:
             st = os.stat(self.filepath)
+            # Stale-IPC gate: zero out previous reads when the C side
+            # has gone quiet long enough that the cached value can no
+            # longer be trusted to reflect what's in front of the lens.
+            # NOTE: must run before the mtime-equality return; the
+            # whole point is to react to "mtime hasn't changed in a
+            # long time", not just "mtime changed since last poll".
+            # When stale we also RETURN (don't fall through to the file
+            # read) -- the on-disk content is the same stale value
+            # whose ghost we're trying to clear, so re-parsing it would
+            # immediately repopulate raw_npu_* with the phantom.
+            if (self._last_mtime > 0 and
+                    now - st.st_mtime >= self.NPU_STALE_THRESHOLD_S):
+                if (self.raw_npu_speed_limit != 0 or
+                        self.raw_npu_camera or
+                        self.raw_npu_confidence != 0.0):
+                    # Log only on the transition so a long C-side outage
+                    # doesn't flood ai_hud.log.
+                    print(f"[NPU] IPC stale "
+                          f"({now - st.st_mtime:.1f}s since last write) "
+                          f"-- clearing raw_npu_* to stop phantom voting")
+                self.raw_npu_speed_limit = 0
+                self.raw_npu_confidence = 0.0
+                self.raw_npu_camera = False
+                self.confidence = 0.0
+                return
+
             if st.st_mtime == self._last_mtime:
                 return  # file unchanged
             self._last_mtime = st.st_mtime
