@@ -78,10 +78,13 @@ static inline int hud_ipc_write(int speed_limit, int camera, float confidence)
 /*
  * Convert detection result (class_id + confidence) to IPC write.
  *
- * Typical usage in the inference loop:
- *   detect_result_group_t results;
- *   // ... run inference, get results ...
- *   hud_ipc_update_from_detections(&results);
+ * Raw variant: writes the per-frame top detection straight to IPC
+ * without any inter-frame voting. Kept for debugging and tooling
+ * that wants the unfiltered NPU truth.
+ *
+ * Typical inference-loop usage should call hud_ipc_update_smoothed()
+ * instead, which applies a small N-of-M ring buffer to suppress
+ * single-frame phantoms before they reach the Python fusion stage.
  */
 static inline void hud_ipc_update_from_detections(
     int num_detections,
@@ -113,6 +116,52 @@ static inline void hud_ipc_update_from_detections(
     float top_conf = best_sign_conf > camera_conf ? best_sign_conf : camera_conf;
     hud_ipc_write(best_sign_limit, camera, top_conf);
 }
+
+/*
+ * Smoothed variant: N-of-M sliding-window vote over the last
+ * HUD_IPC_SMOOTH_WIN inference frames before the IPC write.
+ *
+ * Suppresses single-frame phantoms (motion blur, partial occlusion,
+ * confused background patches) so the Python-side fusion sees a
+ * pre-stabilized stream. The Python fusion still applies its own
+ * 4-of-6 sliding window on top -- the two filters compose, with
+ * different time constants matched to their respective tick rates:
+ *
+ *   C ring (HUD_IPC_SMOOTH_WIN=5 frames, HUD_IPC_SMOOTH_MATCH=3):
+ *     - At 5 FPS (highway): 1 s window, accepts in >=600 ms
+ *     - At 1 FPS (urban) : 5 s window, accepts in >=3 s
+ *   Python fusion (8 s window, 4 matches at ~1 Hz GPS RMC):
+ *     - Adds 3-4 s of cross-source confirmation on top of the C ring
+ *
+ * On winner_count < HUD_IPC_SMOOTH_MATCH the smoothed output writes
+ * speed_limit=0 (i.e. "no stable detection") so the Python side
+ * naturally treats the slot as an absent frame in its own window.
+ *
+ * Camera flag is intentionally NOT smoothed: speed-camera warnings
+ * are transient alerts where a false negative is worse than a false
+ * positive (a falsely warned driver just lifts the throttle).
+ *
+ * Thread-safety: implemented with file-scope static state in
+ * hud_ipc.c. Safe under the single NPU inference thread in
+ * rknn_detect.c; do NOT call from multiple threads concurrently.
+ */
+#define HUD_IPC_SMOOTH_WIN    5
+#define HUD_IPC_SMOOTH_MATCH  3
+
+void hud_ipc_update_smoothed(
+    int num_detections,
+    const int *class_ids,
+    const float *confidences);
+
+/*
+ * Reset the smoothing ring buffer. Call when:
+ *   - NPU inference is disabled (via /tmp/ai_hud_npu_enable=0)
+ *   - The display mode switches between HUD and CAM and you want
+ *     a clean slate for the new mode.
+ * Calling this clears past samples so the next 3 frames decide the
+ * new winner from scratch.
+ */
+void hud_ipc_smoothed_reset(void);
 
 /* ---------------------------------------------------------------------------
  * Python -> C: Read vehicle speed for adaptive inference rate

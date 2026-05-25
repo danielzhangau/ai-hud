@@ -463,6 +463,9 @@ static void *inference_thread_func(void *arg) {
             if (last_npu_enabled) {
                 printf("[INFO] NPU inference disabled by user\n");
                 last_npu_enabled = 0;
+                /* Drop the smoothing ring so a stale phantom can't
+                 * survive a disable/re-enable cycle. */
+                hud_ipc_smoothed_reset();
             }
             usleep(500 * 1000);  /* 500ms idle poll */
             continue;
@@ -557,8 +560,12 @@ static void *inference_thread_func(void *arg) {
                  * in /tmp/ai_hud_detect indefinitely after the sign left
                  * the frame, since the file mtime never changed.
                  *
-                 * hud_ipc_update_from_detections() handles count==0
-                 * correctly: it writes speed_limit=0, camera=0, conf=0.0.
+                 * Use the SMOOTHED writer: a small N-of-M ring inside
+                 * hud_ipc_update_smoothed suppresses single-frame
+                 * phantoms before they reach the Python fusion layer.
+                 * count==0 still feeds the ring (as an "absent" slot),
+                 * so a stable real sign survives a brief occlusion but
+                 * a one-shot misclassification gets aged out.
                  */
                 int cls_ids[OBJ_NUMB_MAX_SIZE];
                 float confs[OBJ_NUMB_MAX_SIZE];
@@ -566,7 +573,7 @@ static void *inference_thread_func(void *arg) {
                     cls_ids[i] = local_result.results[i].class_id;
                     confs[i] = local_result.results[i].prop;
                 }
-                hud_ipc_update_from_detections(
+                hud_ipc_update_smoothed(
                     local_result.count, cls_ids, confs);
 
 #ifndef NDEBUG
