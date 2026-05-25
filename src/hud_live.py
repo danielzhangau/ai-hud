@@ -30,6 +30,20 @@ from ipc_writer import (
     write_gps_ipc, write_heartbeat, write_display_mode_ipc,
 )
 
+# Fusion source identifiers -- module-level so DetectionState methods can
+# reference them. Re-imported from speed_db inside main() if available;
+# the fallback strings mirror speed_db.SOURCE_* exactly.
+try:
+    from speed_db import (
+        SOURCE_DB, SOURCE_NPU,
+        SOURCE_DB_LOW_CONFIDENCE, SOURCE_DEFAULT,
+    )
+except ImportError:
+    SOURCE_DB = "DB"
+    SOURCE_NPU = "NPU"
+    SOURCE_DB_LOW_CONFIDENCE = "DB_LOW_CONFIDENCE"
+    SOURCE_DEFAULT = "DEFAULT"
+
 # ---------------------------------------------------------------------------
 # App version
 # ---------------------------------------------------------------------------
@@ -398,9 +412,26 @@ class DetectionState:
         # Renderer paints "--" while this is True. Defaults True so the
         # first frame (before any GPS fix) shows "--" not region default.
         self.limit_low_confidence = True
+        # Three-state display machine consumed by hud_renderer:
+        #   no_data    -- never had a trusted signal (or coasting timed out)
+        #   confirmed  -- fusion is currently producing SOURCE_DB / NPU
+        #   coasting   -- lost the signal but within COASTING_TIMEOUT_S we
+        #                 still show the last-confirmed number, visually
+        #                 dimmed so the driver can tell it's not live.
+        # Pattern follows the Toyota patent (US 10,152,883) "speed display
+        # disappear" model adapted with an explicit visual-degradation
+        # tier to avoid the Tesla-style stuck-on-stale failure mode.
+        self.display_state = "no_data"
+        self.last_confirmed_limit = 0
+        self.last_confirmed_time = 0.0
         self.last_poll = 0
         self._last_mtime = 0
         self.npu_enabled = True  # user toggle for live detection
+
+    # Coasting hold time after losing the fusion signal. 60s is well
+    # under the Tesla "5 miles ~ 4 min @ 100 km/h" hold but long enough
+    # to bridge typical NPU detection gaps on unmapped backroads.
+    COASTING_TIMEOUT_S = 60.0
 
     # Stale-IPC gate threshold. Must cover the slowest adaptive
     # inference cadence in hud_ipc.h (5000 ms at 0-5 km/h) plus headroom
@@ -492,6 +523,46 @@ class DetectionState:
             self.camera_detected = False
             self.confidence = 0.0
 
+    def update_display_state(self, source, fused_limit, now=None):
+        """Advance the display state machine after each fusion update.
+
+        Called from the main loop right after speed_fusion.update().
+        Owns three derived fields the renderer consumes:
+          self.display_state   -- "no_data" | "confirmed" | "coasting"
+          self.speed_limit     -- numeric value to show (held during coast)
+          self.limit_low_confidence -- True when renderer should paint "--"
+
+        Coasting holds the last confirmed number for COASTING_TIMEOUT_S
+        seconds after losing a SOURCE_DB / SOURCE_NPU signal; the
+        renderer dims the digits during coasting so the driver can tell
+        the value isn't live.
+        """
+        if now is None:
+            now = time.time()
+        has_signal = source in (SOURCE_DB, SOURCE_NPU)
+
+        if has_signal:
+            self.display_state = "confirmed"
+            self.last_confirmed_limit = fused_limit
+            self.last_confirmed_time = now
+            self.speed_limit = fused_limit
+            self.limit_low_confidence = False
+            return
+
+        # Signal absent. Eligible to coast if we have a recent confirmed
+        # value and we're still inside the hold window.
+        if (self.last_confirmed_limit > 0 and
+                now - self.last_confirmed_time < self.COASTING_TIMEOUT_S):
+            self.display_state = "coasting"
+            self.speed_limit = self.last_confirmed_limit
+            self.limit_low_confidence = False
+            return
+
+        # No signal AND no recent confirmed value -- fall back to "--".
+        self.display_state = "no_data"
+        self.speed_limit = fused_limit  # default_limit; only for over-limit math
+        self.limit_low_confidence = True
+
     @property
     def active(self):
         """True if NPU has ever written results."""
@@ -565,14 +636,10 @@ def main():
     SpeedDB_cls = None
     SpeedFusion_cls = None
     fuse_camera_warning_fn = None
-    SOURCE_DB_LOW_CONFIDENCE = "DB_LOW_CONFIDENCE"  # fallback if import fails
-    SOURCE_DEFAULT = "DEFAULT"                       # fallback if import fails
     try:
         from speed_db import SpeedDB as SpeedDB_cls
         from speed_db import SpeedFusion as SpeedFusion_cls
         from speed_db import fuse_camera_warning as fuse_camera_warning_fn
-        from speed_db import SOURCE_DB_LOW_CONFIDENCE
-        from speed_db import SOURCE_DEFAULT
     except ImportError:
         print("Speed DB: module not available, using NPU only")
 
@@ -933,25 +1000,19 @@ def main():
                         db_confidence = getattr(
                             db_result, "speed_confidence", None)
 
-                    # Fuse speed limit via state machine:
-                    # DB is baseline, NPU can only lower (construction),
-                    # requires 3 consecutive high-confidence detections.
-                    #
-                    # IMPORTANT: pass raw_npu_speed_limit (not detect.speed_limit)
-                    # so fusion always sees the per-frame NPU truth, never its
-                    # own previous output. Previously these were conflated.
-                    detect.speed_limit = speed_fusion.update(
+                    # Pass raw_npu_* (not detect.speed_limit) so fusion
+                    # always sees the per-frame NPU truth, never its own
+                    # previous output -- conflation caused stale-vote bug.
+                    fused = speed_fusion.update(
                         db_limit,
                         detect.raw_npu_speed_limit,
                         detect.raw_npu_confidence,
                         db_confidence=db_confidence)
-                    # Propagate the "do not render number" flag to the
-                    # renderer. Triggered for DB_LOW_CONFIDENCE (single-
-                    # source/OSM-only segment) AND SOURCE_DEFAULT (no DB hit
-                    # + no qualifying NPU detection). NPU and trusted DB
-                    # results stay numeric.
-                    detect.limit_low_confidence = speed_fusion.source in (
-                        SOURCE_DB_LOW_CONFIDENCE, SOURCE_DEFAULT)
+                    # Display-state machine owns detect.speed_limit /
+                    # detect.limit_low_confidence from here on; it
+                    # decides whether to coast on the last confirmed
+                    # value or fall back to "--".
+                    detect.update_display_state(speed_fusion.source, fused)
 
                     # Fuse camera warning: DB proximity OR NPU detection
                     if fuse_camera_warning_fn is not None:
@@ -963,13 +1024,12 @@ def main():
                     # GPS lost -- feed db_limit=0 so the NPU window keeps
                     # voting (tunnel scenario). Do not reset() the fusion
                     # or the in-tunnel votes are discarded.
-                    detect.speed_limit = speed_fusion.update(
+                    fused = speed_fusion.update(
                         0,
                         detect.raw_npu_speed_limit,
                         detect.raw_npu_confidence,
                         db_confidence=None)
-                    detect.limit_low_confidence = speed_fusion.source in (
-                        SOURCE_DB_LOW_CONFIDENCE, SOURCE_DEFAULT)
+                    detect.update_display_state(speed_fusion.source, fused)
 
                 # Render: CAM mode lets C binary draw full-screen camera
                 # (no Python overlay); HUD mode renders the full HUD.
