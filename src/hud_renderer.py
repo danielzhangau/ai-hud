@@ -24,6 +24,11 @@ COL_GAUGE_BG = (30, 34, 45)
 COL_LIMIT_BG = (252, 252, 255)
 COL_LIMIT_RING = (215, 40, 40)
 COL_LIMIT_TEXT = (20, 20, 25)
+# Coasting variants: dimmer ring + grey digits tell the driver the
+# number is held-over-from-history, not a live reading.
+COL_LIMIT_BG_COASTING   = (200, 200, 205)
+COL_LIMIT_RING_COASTING = (140, 60, 60)
+COL_LIMIT_TEXT_COASTING = (110, 110, 120)
 
 # ---------------------------------------------------------------------------
 # Arc gauge constants
@@ -47,24 +52,29 @@ SIGN_CX = FB_W - 65
 SIGN_CY = FB_H // 2 + 10
 
 
-def _draw_limit_sign(fb, speed_limit, low_confidence):
+def _draw_limit_sign(fb, speed_limit, low_confidence, coasting=False):
     """Paint the red-ring speed-limit sign at (SIGN_CX, SIGN_CY).
 
     `low_confidence=True` renders "--" -- 宁可不报 policy for
     SINGLE_SOURCE DB hits, no-signal, and GPS-unfixed states.
+    `coasting=True` keeps the number but dims ring + digits so the
+    driver can tell it's a held-over value, not a live reading.
     """
-    fb.fill_circle(SIGN_CX, SIGN_CY, SIGN_R, COL_LIMIT_RING)
-    fb.fill_circle(SIGN_CX, SIGN_CY, SIGN_R - 5, COL_LIMIT_BG)
+    ring_col = COL_LIMIT_RING_COASTING if coasting else COL_LIMIT_RING
+    bg_col   = COL_LIMIT_BG_COASTING   if coasting else COL_LIMIT_BG
+    txt_col  = COL_LIMIT_TEXT_COASTING if coasting else COL_LIMIT_TEXT
+    fb.fill_circle(SIGN_CX, SIGN_CY, SIGN_R, ring_col)
+    fb.fill_circle(SIGN_CX, SIGN_CY, SIGN_R - 5, bg_col)
     limit_str = "--" if low_confidence else str(speed_limit)
     scale = 2
     tw = fb.measure_text(limit_str, scale)
     th = GLYPH_H * scale
     fb.draw_text(limit_str,
                  SIGN_CX - tw // 2, SIGN_CY - th // 2,
-                 COL_LIMIT_TEXT, scale)
+                 txt_col, scale)
 
 
-def _build_base_layer(fb, speed_limit, low_confidence=False):
+def _build_base_layer(fb, speed_limit, low_confidence=False, coasting=False):
     """Pre-render the static background layer: bg + arc track + limit sign.
 
     Returns a snapshot blitted back each frame instead of redrawing.
@@ -72,7 +82,7 @@ def _build_base_layer(fb, speed_limit, low_confidence=False):
     fb.clear(COL_BG)
     fb.draw_thick_arc(ARC_CX, ARC_CY, ARC_R, ARC_START, ARC_END_FULL,
                       COL_GAUGE_BG, width=ARC_WIDTH)
-    _draw_limit_sign(fb, speed_limit, low_confidence)
+    _draw_limit_sign(fb, speed_limit, low_confidence, coasting=coasting)
     fb.fill_rect(20, FB_H - 55, FB_W - 40, 1, COL_DIM)
     return bytearray(fb.buf)
 
@@ -81,7 +91,7 @@ class HUDState:
     """Track previous frame state for delta rendering."""
     __slots__ = ('speed_int', 'over_limit', 'valid', 'satellites',
                  'fix_quality', 'base_layer', 'speed_limit',
-                 'camera_detected', 'limit_low_confidence')
+                 'camera_detected', 'limit_low_confidence', 'coasting')
 
     def __init__(self):
         self.speed_int = -1
@@ -95,6 +105,9 @@ class HUDState:
         # Tracked so a number->-- toggle triggers a base-layer rebuild
         # even when the numeric limit is unchanged.
         self.limit_low_confidence = False
+        # Tracked so a confirmed->coasting transition (same number, dimmed
+        # styling) also triggers a base-layer rebuild.
+        self.coasting = False
 
 
 def render_hud(fb, gps, state, detect, default_speed_limit):
@@ -121,14 +134,18 @@ def render_hud(fb, gps, state, detect, default_speed_limit):
     current_limit = detect.speed_limit if detect else default_speed_limit
     camera = detect.camera_detected if detect else False
     low_conf = detect.limit_low_confidence if detect else False
+    coasting = (getattr(detect, "display_state", None) == "coasting"
+                if detect else False)
 
-    # Suppress over-limit highlight when low_conf -- can't honestly
-    # claim "over" a limit we won't display.
-    over_limit = (not low_conf) and speed_int > current_limit
+    # Suppress over-limit highlight when low_conf OR coasting -- can't
+    # honestly claim "over" a limit we won't display, nor over a stale
+    # held-over value we're no longer confirming live.
+    over_limit = (not low_conf) and (not coasting) and speed_int > current_limit
 
     # --- Delta check: skip full redraw if nothing changed ---
     limit_changed = (state.speed_limit != current_limit
-                     or state.limit_low_confidence != low_conf)
+                     or state.limit_low_confidence != low_conf
+                     or state.coasting != coasting)
     needs_rebuild = limit_changed or state.base_layer is None
     if (not needs_rebuild and
             state.speed_int == speed_int and
@@ -142,7 +159,8 @@ def render_hud(fb, gps, state, detect, default_speed_limit):
     # Rebuild base layer if speed limit changed or invalidated
     if needs_rebuild:
         state.base_layer = _build_base_layer(fb, current_limit,
-                                             low_confidence=low_conf)
+                                             low_confidence=low_conf,
+                                             coasting=coasting)
     fb.buf[:] = state.base_layer
 
     state.speed_int = speed_int
@@ -153,6 +171,7 @@ def render_hud(fb, gps, state, detect, default_speed_limit):
     state.speed_limit = current_limit
     state.camera_detected = camera
     state.limit_low_confidence = low_conf
+    state.coasting = coasting
 
     # --- Colors based on state ---
     speed_color = COL_RED if over_limit else COL_WHITE
@@ -172,7 +191,7 @@ def render_hud(fb, gps, state, detect, default_speed_limit):
         fb.fill_circle(tip_x, tip_y, 6, arc_color)
 
     # Re-draw sign on top of arc (arc overlaps sign at 349-378 deg)
-    _draw_limit_sign(fb, current_limit, low_conf)
+    _draw_limit_sign(fb, current_limit, low_conf, coasting=coasting)
 
     # --- Speed number (huge, centered, shifted slightly left) ---
     speed_str = str(speed_int)
